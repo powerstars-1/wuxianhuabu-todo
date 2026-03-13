@@ -134,7 +134,7 @@ export interface UpdateLanguagePayload {
 
 export interface CreateManualTextCapturePayload {
   text: string;
-  position: {
+  position?: {
     x: number;
     y: number;
   };
@@ -148,4 +148,17 @@ export interface UpdateSourceCardTextPayload {
 export interface UpdateTaskTextPayload {
   taskId: string;
   text: string;
+}
+
+export interface UpdateTaskSummaryPayload {
+  taskId: string;
+  summary: string;
+}
+
+export interface DeleteTaskPayload {
+  taskId: string;
+}
+
+export interface DeleteSourceCardPayload {
+  sourceCardId: string;
 }

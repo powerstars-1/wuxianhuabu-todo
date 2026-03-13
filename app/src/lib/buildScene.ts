@@ -20,16 +20,16 @@ const palettes: Record<
   { backgroundColor: string; strokeColor: string }
 > = {
   text: {
-    backgroundColor: "#fff8eb",
-    strokeColor: "#8a5f16",
+    backgroundColor: "#f7fbff",
+    strokeColor: "#3d63b8",
   },
   image: {
-    backgroundColor: "#eef7f3",
-    strokeColor: "#196754",
+    backgroundColor: "#f2fbf6",
+    strokeColor: "#17724d",
   },
   mixed: {
-    backgroundColor: "#eef4ff",
-    strokeColor: "#2f5db3",
+    backgroundColor: "#fff6ec",
+    strokeColor: "#d16b14",
   },
 };
 
@@ -81,18 +81,18 @@ export const buildScene = (
         captureStatus === "queued" || captureStatus === "processing";
       const isFailed = captureStatus === "failed";
       const backgroundColor = isActive
-        ? "#ffe3bd"
+        ? "#fff0dd"
         : isFailed
-          ? "#fde8e8"
+          ? "#fee8e8"
           : isProcessing
-            ? "#fff6d6"
+            ? "#eef4ff"
             : palette.backgroundColor;
       const strokeColor = isActive
-        ? "#d97706"
+        ? "#ff7a1a"
         : isFailed
-          ? "#c92a2a"
+          ? "#c23a3a"
           : isProcessing
-            ? "#b7791f"
+            ? "#5d76ca"
             : palette.strokeColor;
       const sharedCardProps = {
         x: card.position.x,

@@ -15,6 +15,11 @@ contextBridge.exposeInMainWorld("desktopApi", {
   updateTaskStatus: (payload) =>
     ipcRenderer.invoke("workspace:updateTaskStatus", payload),
   updateTaskText: (payload) => ipcRenderer.invoke("workspace:updateTaskText", payload),
+  updateTaskSummary: (payload) =>
+    ipcRenderer.invoke("workspace:updateTaskSummary", payload),
+  deleteTask: (payload) => ipcRenderer.invoke("workspace:deleteTask", payload),
+  deleteSourceCard: (payload) =>
+    ipcRenderer.invoke("workspace:deleteSourceCard", payload),
   onWorkspaceUpdated: (listener) => {
     const handler = (_event, snapshot) => listener(snapshot);
     ipcRenderer.on("workspace:updated", handler);

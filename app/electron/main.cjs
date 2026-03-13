@@ -298,6 +298,37 @@ const updateTaskText = ({ taskId, text }) => {
   return nextSnapshot;
 };
 
+const updateTaskSummary = ({ taskId, summary }) => {
+  const normalizedSummary = typeof summary === "string" ? summary.trim() : "";
+
+  if (!normalizedSummary) {
+    return repository.getSnapshot();
+  }
+
+  const snapshot = repository.getSnapshot();
+  const taskItem = snapshot.taskItems.find((item) => item.id === taskId);
+
+  if (!taskItem) {
+    return snapshot;
+  }
+
+  const nextSnapshot = repository.updateTaskSummary(taskId, normalizedSummary);
+  broadcastSnapshot(nextSnapshot);
+  return nextSnapshot;
+};
+
+const deleteTask = ({ taskId }) => {
+  const snapshot = repository.deleteTask(taskId);
+  broadcastSnapshot(snapshot);
+  return snapshot;
+};
+
+const deleteSourceCard = ({ sourceCardId }) => {
+  const snapshot = repository.deleteSourceCard(sourceCardId);
+  broadcastSnapshot(snapshot);
+  return snapshot;
+};
+
 app.on("before-quit", () => {
   isQuitting = true;
 });
@@ -360,6 +391,15 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("workspace:updateTaskText", (_event, payload) =>
     updateTaskText(payload),
+  );
+
+  ipcMain.handle("workspace:updateTaskSummary", (_event, payload) =>
+    updateTaskSummary(payload),
+  );
+
+  ipcMain.handle("workspace:deleteTask", (_event, payload) => deleteTask(payload));
+  ipcMain.handle("workspace:deleteSourceCard", (_event, payload) =>
+    deleteSourceCard(payload),
   );
 
   app.on("activate", () => {

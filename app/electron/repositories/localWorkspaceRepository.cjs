@@ -128,6 +128,105 @@ class LocalWorkspaceRepository {
     return clone(this.readWorkspace());
   }
 
+  deleteAttachmentFiles(attachments) {
+    attachments.forEach((attachment) => {
+      const absolutePath = path.join(this.attachmentsDir, attachment.storageKey);
+
+      if (!fs.existsSync(absolutePath)) {
+        return;
+      }
+
+      try {
+        fs.unlinkSync(absolutePath);
+      } catch (error) {
+        // Best-effort cleanup. Workspace consistency is more important than file deletion.
+      }
+    });
+  }
+
+  cleanupWorkspaceRelations(workspace, updatedAt) {
+    const sourceCardIds = new Set(workspace.sourceCards.map((item) => item.id));
+
+    workspace.taskItems = workspace.taskItems
+      .map((taskItem) => {
+        const nextSourceCardIds = taskItem.sourceCardIds.filter((sourceCardId) =>
+          sourceCardIds.has(sourceCardId),
+        );
+
+        if (nextSourceCardIds.length === taskItem.sourceCardIds.length) {
+          return taskItem;
+        }
+
+        return {
+          ...taskItem,
+          sourceCardIds: nextSourceCardIds,
+          updatedAt,
+        };
+      })
+      .filter((taskItem) => taskItem.sourceCardIds.length > 0);
+
+    const taskIds = new Set(workspace.taskItems.map((item) => item.id));
+
+    workspace.sourceCards.forEach((sourceCard) => {
+      const nextLinkedTaskIds = sourceCard.linkedTaskIds.filter((taskId) =>
+        taskIds.has(taskId),
+      );
+
+      if (nextLinkedTaskIds.length === sourceCard.linkedTaskIds.length) {
+        return;
+      }
+
+      sourceCard.linkedTaskIds = nextLinkedTaskIds;
+      sourceCard.updatedAt = updatedAt;
+    });
+
+    const captureIds = new Set(workspace.sourceCards.map((item) => item.captureId));
+    workspace.captures = workspace.captures.filter((capture) => captureIds.has(capture.id));
+
+    const attachmentIds = new Set(
+      workspace.sourceCards.flatMap((sourceCard) => sourceCard.attachmentIds),
+    );
+    const removedAttachments = workspace.attachments.filter(
+      (attachment) => !attachmentIds.has(attachment.id),
+    );
+
+    if (removedAttachments.length > 0) {
+      this.deleteAttachmentFiles(removedAttachments);
+    }
+
+    workspace.attachments = workspace.attachments.filter((attachment) =>
+      attachmentIds.has(attachment.id),
+    );
+
+    if (workspace.ui.lastCaptureId && !captureIds.has(workspace.ui.lastCaptureId)) {
+      const fallbackCapture = workspace.captures[0] || null;
+      workspace.ui.lastCaptureId = fallbackCapture?.id || null;
+      workspace.ui.lastCaptureAt = fallbackCapture?.createdAt || null;
+    }
+
+    workspace.ui.activeCaptureCount = workspace.captures.filter(
+      (item) => item.aiStatus === "queued" || item.aiStatus === "processing",
+    ).length;
+  }
+
+  removeSourceCards(workspace, sourceCardIds, updatedAt) {
+    const sourceCardIdSet = new Set(sourceCardIds);
+
+    if (sourceCardIdSet.size === 0) {
+      return;
+    }
+
+    workspace.sourceCards = workspace.sourceCards.filter(
+      (sourceCard) => !sourceCardIdSet.has(sourceCard.id),
+    );
+    workspace.taskItems = workspace.taskItems.filter(
+      (taskItem) =>
+        !taskItem.sourceCardIds.some((sourceCardId) => sourceCardIdSet.has(sourceCardId)),
+    );
+
+    this.cleanupWorkspaceRelations(workspace, updatedAt);
+  }
+
   createAttachmentFromPng(buffer) {
     const id = createId("attachment");
     const createdAt = nowIso();
@@ -394,8 +493,96 @@ class LocalWorkspaceRepository {
 
     const updatedAt = nowIso();
     taskItem.title = text;
-    taskItem.summary = text;
     taskItem.updatedAt = updatedAt;
+    workspace.board.updatedAt = updatedAt;
+    workspace.updatedAt = updatedAt;
+
+    this.writeWorkspace(workspace);
+
+    return clone(workspace);
+  }
+
+  updateTaskSummary(taskId, summary) {
+    const workspace = this.readWorkspace();
+    const taskItem = workspace.taskItems.find((item) => item.id === taskId);
+
+    if (!taskItem) {
+      return clone(workspace);
+    }
+
+    const updatedAt = nowIso();
+    taskItem.summary = summary;
+    taskItem.updatedAt = updatedAt;
+    workspace.board.updatedAt = updatedAt;
+    workspace.updatedAt = updatedAt;
+
+    this.writeWorkspace(workspace);
+
+    return clone(workspace);
+  }
+
+  deleteTask(taskId) {
+    const workspace = this.readWorkspace();
+    const taskItem = workspace.taskItems.find((item) => item.id === taskId);
+
+    if (!taskItem) {
+      return clone(workspace);
+    }
+
+    const updatedAt = nowIso();
+    workspace.taskItems = workspace.taskItems.filter((item) => item.id !== taskId);
+    const orphanSourceCardIds = [];
+
+    workspace.sourceCards.forEach((sourceCard) => {
+      if (!sourceCard.linkedTaskIds.includes(taskId)) {
+        return;
+      }
+
+      sourceCard.linkedTaskIds = sourceCard.linkedTaskIds.filter((id) => id !== taskId);
+
+      if (sourceCard.linkedTaskIds.length === 0) {
+        orphanSourceCardIds.push(sourceCard.id);
+        return;
+      }
+
+      sourceCard.updatedAt = updatedAt;
+    });
+
+    this.removeSourceCards(workspace, orphanSourceCardIds, updatedAt);
+    this.cleanupWorkspaceRelations(workspace, updatedAt);
+
+    if (
+      taskItem.sourceCardIds.length > 0 &&
+      workspace.sourceCards.some((sourceCard) =>
+        taskItem.sourceCardIds.includes(sourceCard.id),
+      )
+    ) {
+      workspace.sourceCards.forEach((sourceCard) => {
+        if (!taskItem.sourceCardIds.includes(sourceCard.id)) {
+          return;
+        }
+
+        sourceCard.updatedAt = updatedAt;
+      });
+    }
+
+    workspace.board.updatedAt = updatedAt;
+    workspace.updatedAt = updatedAt;
+
+    this.writeWorkspace(workspace);
+
+    return clone(workspace);
+  }
+
+  deleteSourceCard(sourceCardId) {
+    const workspace = this.readWorkspace();
+
+    if (!workspace.sourceCards.some((item) => item.id === sourceCardId)) {
+      return clone(workspace);
+    }
+
+    const updatedAt = nowIso();
+    this.removeSourceCards(workspace, [sourceCardId], updatedAt);
     workspace.board.updatedAt = updatedAt;
     workspace.updatedAt = updatedAt;
 

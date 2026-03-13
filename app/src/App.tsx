@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   CaptureUpdateAction,
   Excalidraw,
@@ -28,6 +29,7 @@ import type {
   ScrollState,
   SourceCard,
   TaskItem,
+  TaskStatus,
   WorkspaceSnapshot,
 } from "./types";
 
@@ -63,6 +65,7 @@ const EMPTY_SCROLL_STATE: ScrollState = {
 };
 
 const LANGUAGE_OPTIONS: AppLanguage[] = ["zh-CN", "en-US"];
+const TASK_STATUS_ORDER: TaskStatus[] = ["inbox", "doing", "done"];
 
 const formatDateTime = (value: string, language: AppLanguage) =>
   new Intl.DateTimeFormat(language, {
@@ -71,6 +74,9 @@ const formatDateTime = (value: string, language: AppLanguage) =>
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
+
+const formatTimeHint = (value: string | null | undefined, fallback: string) =>
+  value?.trim() || fallback;
 
 const getSourceCardsForTask = (
   workspace: WorkspaceSnapshot,
@@ -97,12 +103,12 @@ const getPrimaryCapture = (
   );
 };
 
-const getLinkedTaskIdFromSelection = (
+const getSelectedSourceCardIdFromSelection = (
   workspace: WorkspaceSnapshot,
   elements: readonly SceneElementLike[],
   selectedElementIds: Readonly<Record<string, true>>,
 ) => {
-  const selectedSourceCardId = Object.keys(selectedElementIds)
+  return Object.keys(selectedElementIds)
     .map((selectedElementId) => {
       if (workspace.sourceCards.some((card) => card.id === selectedElementId)) {
         return selectedElementId;
@@ -131,15 +137,6 @@ const getLinkedTaskIdFromSelection = (
       return null;
     })
     .find((value): value is string => Boolean(value));
-
-  if (!selectedSourceCardId) {
-    return null;
-  }
-
-  return (
-    workspace.sourceCards.find((card) => card.id === selectedSourceCardId)
-      ?.linkedTaskIds[0] || null
-  );
 };
 
 const getStatusTone = (status: string) => {
@@ -221,16 +218,58 @@ const readImageDimensions = (dataUrl: string) =>
     image.src = dataUrl;
   });
 
+const TrashIcon = () => (
+  <svg
+    aria-hidden="true"
+    viewBox="0 0 16 16"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.45"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M3.5 4.5h9" />
+    <path d="M6.5 2.75h3" />
+    <path d="M5 4.5v7.25a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1V4.5" />
+    <path d="M6.75 6.75v3.25" />
+    <path d="M9.25 6.75v3.25" />
+  </svg>
+);
+
+const CloseIcon = () => (
+  <svg
+    aria-hidden="true"
+    viewBox="0 0 16 16"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.6"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M4 4l8 8" />
+    <path d="M12 4l-8 8" />
+  </svg>
+);
+
 export default function App() {
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot | null>(null);
   const [hoveredTaskId, setHoveredTaskId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedSourceCardId, setSelectedSourceCardId] = useState<string | null>(null);
   const [scrollState, setScrollState] = useState<ScrollState>(EMPTY_SCROLL_STATE);
   const [canvasApi, setCanvasApi] = useState<ExcalidrawImperativeAPI | null>(null);
   const [viewportTick, setViewportTick] = useState(0);
   const [attachmentPreviewUrl, setAttachmentPreviewUrl] = useState<string | null>(null);
+  const [lightboxImageUrl, setLightboxImageUrl] = useState<string | null>(null);
+  const [isManualComposerOpen, setIsManualComposerOpen] = useState(false);
+  const [manualCaptureDraft, setManualCaptureDraft] = useState("");
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isInspectorOpen, setIsInspectorOpen] = useState(false);
   const [draftTaskTitle, setDraftTaskTitle] = useState("");
+  const [draftTaskSummary, setDraftTaskSummary] = useState("");
+  const [editingTaskField, setEditingTaskField] = useState<"title" | "summary" | null>(
+    null,
+  );
   const [draftSourceText, setDraftSourceText] = useState("");
   const [imageAttachmentsById, setImageAttachmentsById] = useState<
     Record<string, LoadedImageAttachment>
@@ -247,6 +286,7 @@ export default function App() {
   const previousLastCaptureIdRef = useRef<string | null>(null);
   const registeredCanvasApiIdRef = useRef<string | null>(null);
   const registeredAttachmentIdsRef = useRef(new Set<string>());
+  const pendingSourceCardDeletesRef = useRef(new Set<string>());
 
   const language = workspace?.ui.language ?? DEFAULT_LANGUAGE;
   const t = getMessages(language);
@@ -298,13 +338,37 @@ export default function App() {
   }, [canvasApi]);
 
   useEffect(() => {
-    if (!isSettingsOpen) {
+    if (
+      !isSettingsOpen &&
+      !isInspectorOpen &&
+      !lightboxImageUrl &&
+      !isManualComposerOpen
+    ) {
       return;
     }
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      if (lightboxImageUrl) {
+        setLightboxImageUrl(null);
+        return;
+      }
+
+      if (isManualComposerOpen) {
+        setIsManualComposerOpen(false);
+        return;
+      }
+
+      if (isSettingsOpen) {
         setIsSettingsOpen(false);
+        return;
+      }
+
+      if (isInspectorOpen) {
+        setIsInspectorOpen(false);
       }
     };
 
@@ -313,42 +377,84 @@ export default function App() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [isSettingsOpen]);
+  }, [isInspectorOpen, isSettingsOpen, lightboxImageUrl, isManualComposerOpen]);
 
   useEffect(() => {
     if (!workspace) {
       return;
     }
 
-    const selectedTaskStillExists = Boolean(
-      selectedTaskId &&
-        workspace.taskItems.some((taskItem) => taskItem.id === selectedTaskId),
-    );
     const latestCaptureId = workspace.ui.lastCaptureId ?? null;
 
-    if (
-      latestCaptureId &&
-      latestCaptureId !== previousLastCaptureIdRef.current
-    ) {
-      previousLastCaptureIdRef.current = latestCaptureId;
-      const relatedSourceCard = workspace.sourceCards.find(
-        (card) => card.captureId === latestCaptureId,
-      );
-
-      if (relatedSourceCard?.linkedTaskIds[0]) {
-        setSelectedTaskId(relatedSourceCard.linkedTaskIds[0]);
-        return;
-      }
+    if (!latestCaptureId || latestCaptureId === previousLastCaptureIdRef.current) {
+      return;
     }
 
     previousLastCaptureIdRef.current = latestCaptureId;
+    const relatedSourceCard =
+      workspace.sourceCards.find((card) => card.captureId === latestCaptureId) || null;
 
-    if (selectedTaskStillExists) {
+    if (!relatedSourceCard) {
+      return;
+    }
+
+    setSelectedSourceCardId(relatedSourceCard.id);
+
+    if (relatedSourceCard.linkedTaskIds[0]) {
+      setSelectedTaskId(relatedSourceCard.linkedTaskIds[0]);
+    }
+  }, [workspace]);
+
+  useEffect(() => {
+    if (!workspace) {
+      return;
+    }
+
+    if (
+      selectedTaskId &&
+      workspace.taskItems.some((taskItem) => taskItem.id === selectedTaskId)
+    ) {
+      return;
+    }
+
+    if (!selectedTaskId && selectedSourceCardId) {
       return;
     }
 
     setSelectedTaskId(workspace.taskItems[0]?.id ?? null);
-  }, [workspace, selectedTaskId]);
+  }, [workspace, selectedSourceCardId, selectedTaskId]);
+
+  useEffect(() => {
+    if (!workspace) {
+      return;
+    }
+
+    const selectedSourceCardStillExists = Boolean(
+      selectedSourceCardId &&
+        workspace.sourceCards.some((sourceCard) => sourceCard.id === selectedSourceCardId),
+    );
+
+    if (selectedSourceCardStillExists) {
+      return;
+    }
+
+    const sourceCardIdFromSelectedTask = selectedTaskId
+      ? workspace.taskItems.find((taskItem) => taskItem.id === selectedTaskId)
+          ?.sourceCardIds[0] || null
+      : null;
+    const latestSourceCardId = workspace.ui.lastCaptureId
+      ? workspace.sourceCards.find(
+          (sourceCard) => sourceCard.captureId === workspace.ui.lastCaptureId,
+        )?.id || null
+      : null;
+
+    setSelectedSourceCardId(
+      sourceCardIdFromSelectedTask ||
+        latestSourceCardId ||
+        workspace.sourceCards[0]?.id ||
+        null,
+    );
+  }, [workspace, selectedSourceCardId, selectedTaskId]);
 
   const captureStatusById =
     workspace?.captures.reduce<Record<string, CaptureStatus>>((acc, capture) => {
@@ -373,7 +479,9 @@ export default function App() {
     const activeTaskId = hoveredTaskId || selectedTaskId;
     const activeTask =
       workspace.taskItems.find((taskItem) => taskItem.id === activeTaskId) || null;
-    const activeSourceIds = activeTask?.sourceCardIds || [];
+    const activeSourceIds =
+      activeTask?.sourceCardIds ||
+      (selectedSourceCardId ? [selectedSourceCardId] : []);
 
     canvasApi.updateScene({
       elements: buildScene(
@@ -392,6 +500,7 @@ export default function App() {
     imageAttachmentsById,
     language,
     selectedTaskId,
+    selectedSourceCardId,
     workspace,
   ]);
 
@@ -563,18 +672,51 @@ export default function App() {
     });
   }, [canvasApi, selectedTaskId, workspace]);
 
+  useEffect(() => {
+    if (!workspace) {
+      return;
+    }
+
+    pendingSourceCardDeletesRef.current.forEach((sourceCardId) => {
+      if (!workspace.sourceCards.some((sourceCard) => sourceCard.id === sourceCardId)) {
+        pendingSourceCardDeletesRef.current.delete(sourceCardId);
+      }
+    });
+  }, [workspace]);
+
   const activeTaskId = hoveredTaskId || selectedTaskId;
   const activeTask =
     workspace?.taskItems.find((taskItem) => taskItem.id === activeTaskId) || null;
-  const orderedTaskItems = workspace
-    ? [
-        ...workspace.taskItems.filter((taskItem) => taskItem.status !== "done"),
-        ...workspace.taskItems.filter((taskItem) => taskItem.status === "done"),
-      ]
-    : [];
-  const activeSourceCards = workspace
-    ? getSourceCardsForTask(workspace, activeTask)
-    : [];
+  const taskSections = TASK_STATUS_ORDER.map((status) => ({
+    status,
+    title: t.taskSections[status].title,
+    items: workspace?.taskItems.filter((taskItem) => taskItem.status === status) || [],
+  }));
+  const taskSectionCountByStatus = taskSections.reduce<Record<TaskStatus, number>>(
+    (accumulator, section) => {
+      accumulator[section.status] = section.items.length;
+      return accumulator;
+    },
+    {
+      inbox: 0,
+      doing: 0,
+      done: 0,
+    },
+  );
+  const totalTaskCount = workspace?.taskItems.length || 0;
+  const sourceCount = workspace?.sourceCards.length || 0;
+  const isEmptyCanvas = Boolean(workspace && workspace.sourceCards.length === 0);
+  const selectedSourceCard =
+    workspace && selectedSourceCardId
+      ? workspace.sourceCards.find((sourceCard) => sourceCard.id === selectedSourceCardId) ||
+        null
+      : null;
+  const activeSourceCards =
+    workspace && activeTask
+      ? getSourceCardsForTask(workspace, activeTask)
+      : selectedSourceCard
+        ? [selectedSourceCard]
+        : [];
   const primaryCapture =
     workspace && activeSourceCards.length > 0
       ? getPrimaryCapture(workspace, activeSourceCards)
@@ -591,6 +733,8 @@ export default function App() {
       : null);
   const inspectedSourceCards = activeTask
     ? activeSourceCards
+    : selectedSourceCard
+      ? [selectedSourceCard]
     : lastCapturedSourceCard
       ? [lastCapturedSourceCard]
       : [];
@@ -601,8 +745,20 @@ export default function App() {
   }, [activeTask?.id, activeTask?.title]);
 
   useEffect(() => {
+    setDraftTaskSummary(activeTask?.summary || "");
+  }, [activeTask?.id, activeTask?.summary]);
+
+  useEffect(() => {
     setDraftSourceText(inspectedCapture?.rawText || "");
   }, [inspectedCapture?.id, inspectedCapture?.rawText]);
+
+  useEffect(() => {
+    if (isInspectorOpen && activeTask) {
+      return;
+    }
+
+    setEditingTaskField(null);
+  }, [activeTask, isInspectorOpen]);
 
   useEffect(() => {
     let disposed = false;
@@ -630,6 +786,14 @@ export default function App() {
   }, [inspectedCapture?.attachmentIds, inspectedCapture?.id]);
 
   useEffect(() => {
+    if (attachmentPreviewUrl) {
+      return;
+    }
+
+    setLightboxImageUrl(null);
+  }, [attachmentPreviewUrl]);
+
+  useEffect(() => {
     if (!canvasApi || !workspace) {
       return;
     }
@@ -646,20 +810,24 @@ export default function App() {
         );
       }
 
-      const linkedTaskId = getLinkedTaskIdFromSelection(
+      const selectedSourceCardId = getSelectedSourceCardIdFromSelection(
         workspace,
         canvasApi.getSceneElements(),
         canvasApi.getAppState().selectedElementIds,
       );
 
-      if (!linkedTaskId) {
+      if (!selectedSourceCardId) {
         return;
       }
 
+      const linkedTaskId =
+        workspace.sourceCards.find((card) => card.id === selectedSourceCardId)
+          ?.linkedTaskIds[0] || null;
+
       setHoveredTaskId(null);
-      setSelectedTaskId((current) =>
-        current === linkedTaskId ? current : linkedTaskId,
-      );
+      setSelectedSourceCardId(selectedSourceCardId);
+      setSelectedTaskId(linkedTaskId);
+      setIsInspectorOpen(true);
     });
   }, [canvasApi, workspace]);
 
@@ -679,9 +847,24 @@ export default function App() {
     await window.desktopApi.captureClipboard();
   };
 
+  const handleManualCaptureSubmit = async () => {
+    const normalizedText = manualCaptureDraft.trim();
+
+    if (!normalizedText) {
+      return;
+    }
+
+    setIsManualComposerOpen(false);
+    setManualCaptureDraft("");
+    await window.desktopApi.createManualTextCapture({
+      text: normalizedText,
+    });
+  };
+
   const handleTaskClick = (taskItem: TaskItem) => {
     setHoveredTaskId(null);
     setSelectedTaskId(taskItem.id);
+    setSelectedSourceCardId(taskItem.sourceCardIds[0] || null);
 
     if (!canvasApi) {
       return;
@@ -720,6 +903,23 @@ export default function App() {
     );
   };
 
+  const handleTaskDelete = async (taskItem: TaskItem) => {
+    const confirmed = window.confirm(t.deleteTaskConfirm(taskItem.title));
+
+    if (!confirmed) {
+      return;
+    }
+
+    setHoveredTaskId((current) => (current === taskItem.id ? null : current));
+    setSelectedTaskId((current) => (current === taskItem.id ? null : current));
+    setSelectedSourceCardId((current) =>
+      taskItem.sourceCardIds.includes(current || "") ? null : current,
+    );
+    await window.desktopApi.deleteTask({
+      taskId: taskItem.id,
+    });
+  };
+
   const handleLanguageChange = async (nextLanguage: AppLanguage) => {
     await window.desktopApi.updateLanguage({
       language: nextLanguage,
@@ -736,10 +936,12 @@ export default function App() {
 
     if (!normalizedText) {
       setDraftTaskTitle(activeTask.title);
+      setEditingTaskField(null);
       return;
     }
 
     if (normalizedText === activeTask.title) {
+      setEditingTaskField(null);
       return;
     }
 
@@ -747,6 +949,32 @@ export default function App() {
       taskId: activeTask.id,
       text: normalizedText,
     });
+    setEditingTaskField(null);
+  };
+
+  const handleTaskSummaryCommit = async () => {
+    if (!activeTask) {
+      return;
+    }
+
+    const normalizedSummary = draftTaskSummary.trim();
+
+    if (!normalizedSummary) {
+      setDraftTaskSummary(activeTask.summary);
+      setEditingTaskField(null);
+      return;
+    }
+
+    if (normalizedSummary === activeTask.summary) {
+      setEditingTaskField(null);
+      return;
+    }
+
+    await window.desktopApi.updateTaskSummary({
+      taskId: activeTask.id,
+      summary: normalizedSummary,
+    });
+    setEditingTaskField(null);
   };
 
   const handleSourceTextCommit = async () => {
@@ -815,6 +1043,51 @@ export default function App() {
     });
 
     if (!workspace) {
+      return;
+    }
+
+    const workspaceSourceCardIds = new Set(
+      workspace.sourceCards.map((sourceCard) => sourceCard.id),
+    );
+    const deletedSourceCardIds = Array.from(
+      new Set(
+        elements
+          .filter((element) => element.isDeleted)
+          .map((element) => {
+            if (workspaceSourceCardIds.has(element.id)) {
+              return element.id;
+            }
+
+            const sourceCardIdFromCustomData =
+              typeof element.customData?.sourceCardId === "string"
+                ? element.customData.sourceCardId
+                : null;
+
+            if (
+              sourceCardIdFromCustomData &&
+              workspaceSourceCardIds.has(sourceCardIdFromCustomData)
+            ) {
+              return sourceCardIdFromCustomData;
+            }
+
+            return null;
+          })
+          .filter((sourceCardId): sourceCardId is string => Boolean(sourceCardId)),
+      ),
+    ).filter((sourceCardId) => !pendingSourceCardDeletesRef.current.has(sourceCardId));
+
+    if (deletedSourceCardIds.length > 0) {
+      deletedSourceCardIds.forEach((sourceCardId) => {
+        pendingSourceCardDeletesRef.current.add(sourceCardId);
+        void window.desktopApi
+          .deleteSourceCard({
+            sourceCardId,
+          })
+          .finally(() => {
+            pendingSourceCardDeletesRef.current.delete(sourceCardId);
+          });
+      });
+
       return;
     }
 
@@ -979,54 +1252,125 @@ export default function App() {
     inspectedSourceCards[0]?.title ||
     t.pickTask;
   const detailCaptureStatus = inspectedCapture?.aiStatus || null;
+  const hasInspectorContent = Boolean(activeTask || inspectedCapture);
+  const inspectorSummary =
+    activeTask?.summary ||
+    inspectedCapture?.aiSummary ||
+    t.hoverToInspect;
+  const inspectorCreatedAt =
+    activeTask?.createdAt || inspectedCapture?.createdAt || null;
+  const handleTaskTitleKeyDown = (
+    event: ReactKeyboardEvent<HTMLInputElement>,
+  ) => {
+    if (event.key === "Escape") {
+      setDraftTaskTitle(activeTask?.title || "");
+      setEditingTaskField(null);
+      event.currentTarget.blur();
+      return;
+    }
+
+    if (event.key !== "Enter") {
+      return;
+    }
+
+    event.preventDefault();
+    void handleTaskTitleCommit();
+    event.currentTarget.blur();
+  };
+  const handleTaskSummaryKeyDown = (
+    event: ReactKeyboardEvent<HTMLTextAreaElement>,
+  ) => {
+    if (event.key === "Escape") {
+      setDraftTaskSummary(activeTask?.summary || "");
+      setEditingTaskField(null);
+      event.currentTarget.blur();
+      return;
+    }
+
+    if (event.key !== "Enter" || (!event.metaKey && !event.ctrlKey)) {
+      return;
+    }
+
+    event.preventDefault();
+    void handleTaskSummaryCommit();
+    event.currentTarget.blur();
+  };
+  const handleSourceTextKeyDown = (
+    event: ReactKeyboardEvent<HTMLTextAreaElement>,
+  ) => {
+    if (event.key !== "Enter" || (!event.metaKey && !event.ctrlKey)) {
+      return;
+    }
+
+    event.preventDefault();
+    void handleSourceTextCommit();
+    event.currentTarget.blur();
+  };
 
   void viewportTick;
 
   return (
     <div className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">{t.productEyebrow}</p>
-          <h1>{workspace?.board.name || t.appTitle}</h1>
-        </div>
+      <div
+        className={`workspace-body${isInspectorOpen && hasInspectorContent ? " has-inspector" : ""}`}
+        ref={workspaceRef}
+      >
+        <div className="workspace-backdrop" aria-hidden="true" />
+        <header className="topbar">
+          <div className="topbar__header">
+            <div className="topbar__brand">
+              <p className="eyebrow">{t.productEyebrow}</p>
+              <div className="topbar__title-row">
+                <h1>{workspace?.board.name || t.appTitle}</h1>
+                <div className="shortcut-pill">
+                  {workspace?.ui.shortcut || "Ctrl+Shift+V"}
+                </div>
+              </div>
+            </div>
 
-        <div className="topbar__status">
-          <div
-            className="status-chip"
-            data-state={getStatusTone(workspace?.ui.captureStatus || "ready")}
-          >
-            <span className="status-dot" />
-            <span>{workspace?.ui.captureMessage || t.loadingWorkspace}</span>
+            <div className="topbar__actions">
+              <button
+                className="secondary-button"
+                onClick={() => setIsSettingsOpen(true)}
+              >
+                {t.settings}
+              </button>
+              <button className="capture-button" onClick={handleCaptureClick}>
+                {t.captureClipboard}
+              </button>
+            </div>
           </div>
-          <div className="status-metric">
-            <strong>{workspace?.sourceCards.length || 0}</strong>
-            <span>{t.sourcesLabel}</span>
-          </div>
-          <div className="status-metric">
-            <strong>{workspace?.taskItems.length || 0}</strong>
-            <span>{t.tasksLabel}</span>
-          </div>
-          <div className="status-metric">
-            <strong>{workspace?.ui.activeCaptureCount || 0}</strong>
-            <span>{t.processingLabel}</span>
-          </div>
-        </div>
 
-        <div className="topbar__actions">
-          <button
-            className="secondary-button"
-            onClick={() => setIsSettingsOpen(true)}
-          >
-            {t.settings}
-          </button>
-          <button className="capture-button" onClick={handleCaptureClick}>
-            {t.captureClipboard}
-          </button>
-          <div className="shortcut-pill">{workspace?.ui.shortcut || "Ctrl+Shift+V"}</div>
-        </div>
-      </header>
+          <div className="topbar__status-row">
+            <div
+              className="status-chip"
+              data-state={getStatusTone(workspace?.ui.captureStatus || "ready")}
+            >
+              <span className="status-dot" />
+              <span>{workspace?.ui.captureMessage || t.loadingWorkspace}</span>
+            </div>
+          </div>
 
-      <div className="workspace-body" ref={workspaceRef}>
+          <div className="topbar__metrics">
+            <div className="status-metric">
+              <strong>{sourceCount}</strong>
+              <span>{t.sourcesLabel}</span>
+            </div>
+            <div className="status-metric">
+              <strong>{taskSectionCountByStatus.inbox}</strong>
+              <span>{t.taskSections.inbox.title}</span>
+            </div>
+            <div className="status-metric">
+              <strong>{taskSectionCountByStatus.doing}</strong>
+              <span>{t.taskSections.doing.title}</span>
+            </div>
+            <div className="status-metric">
+              <strong>{taskSectionCountByStatus.done}</strong>
+              <span>{t.taskSections.done.title}</span>
+            </div>
+          </div>
+        </header>
+
         <svg className="link-layer" aria-hidden="true">
           {connectorPaths.map((pathItem) => (
             <path key={pathItem.id} d={pathItem.d} />
@@ -1034,25 +1378,7 @@ export default function App() {
         </svg>
 
         <section className="canvas-pane">
-          <div className="canvas-pane__header">
-            <div>
-              <p className="pane-label">{t.sourceCanvasLabel}</p>
-              <h2>{t.sourceCanvasTitle}</h2>
-            </div>
-            <div className="canvas-pane__legend">
-              <span>{t.sourceCanvasLegend}</span>
-            </div>
-          </div>
-
           <div className="canvas-stage" ref={canvasPaneRef}>
-            {workspace && workspace.sourceCards.length === 0 ? (
-              <div className="empty-canvas">
-                <p className="empty-canvas__eyebrow">{t.emptyCanvasEyebrow}</p>
-                <h3>{t.emptyCanvasTitle}</h3>
-                <p>{t.emptyCanvasBody}</p>
-              </div>
-            ) : null}
-
             <Excalidraw
               langCode={language === "zh-CN" ? "zh-CN" : "en"}
               excalidrawAPI={setCanvasApi}
@@ -1061,7 +1387,7 @@ export default function App() {
               initialData={{
                 elements: [],
                 appState: {
-                  viewBackgroundColor: "#f7f1e5",
+                  viewBackgroundColor: "#eef3f7",
                 },
               }}
               zenModeEnabled
@@ -1078,66 +1404,327 @@ export default function App() {
               }}
             />
           </div>
+          <div className={`canvas-pane__badge${isEmptyCanvas ? " is-empty" : ""}`}>
+            <div className="canvas-pane__badge-copy">
+              <p className="eyebrow">
+                {isEmptyCanvas ? t.emptyCanvasEyebrow : t.sourceCanvasLabel}
+              </p>
+              <p className="canvas-pane__badge-title">
+                {isEmptyCanvas ? t.emptyCanvasTitle : t.sourceCanvasLegend}
+              </p>
+              {isEmptyCanvas ? (
+                <p className="canvas-pane__badge-note">{t.emptyCanvasBody}</p>
+              ) : null}
+            </div>
+            <div className="canvas-pane__badge-actions">
+              <button
+                className="secondary-button secondary-button--compact"
+                onClick={() => setIsManualComposerOpen(true)}
+              >
+                {t.manualAdd}
+              </button>
+            </div>
+          </div>
         </section>
 
         <aside className="task-pane">
           <div className="task-pane__header">
-            <div>
+            <div className="task-pane__heading">
               <p className="pane-label">{t.taskProjectionLabel}</p>
-              <h2>{t.taskProjectionTitle}</h2>
+              <div className="task-pane__title-row">
+                <h2>{t.tasksLabel}</h2>
+                <span className="task-pane__count">{totalTaskCount}</span>
+              </div>
             </div>
-            <div className="task-pane__meta">
-              <span>{t.tasksLabel}</span>
-              <strong>{workspace?.taskItems.length || 0}</strong>
-            </div>
+            {hasInspectorContent ? (
+              <button
+                className="secondary-button secondary-button--compact"
+                onClick={() => setIsInspectorOpen(true)}
+              >
+                {t.openInspector}
+              </button>
+            ) : null}
           </div>
 
           <div className="task-pane__sections">
-            {orderedTaskItems.length === 0 ? (
+            {totalTaskCount === 0 ? (
               <div className="task-empty">{t.noItems}</div>
             ) : (
-              orderedTaskItems.map((taskItem) => {
-                const isHovered = hoveredTaskId === taskItem.id;
-                const isSelected = selectedTaskId === taskItem.id;
-                const isDone = taskItem.status === "done";
-
-                return (
-                  <div
-                    key={taskItem.id}
-                    ref={(node) => {
-                      taskRowRefs.current.set(taskItem.id, node);
-                    }}
-                    className={`task-row${isHovered ? " is-hovered" : ""}${
-                      isSelected ? " is-selected" : ""
-                    }${isDone ? " is-done" : ""}`}
-                    onMouseEnter={() => setHoveredTaskId(taskItem.id)}
-                    onMouseLeave={() => setHoveredTaskId((current) =>
-                      current === taskItem.id ? null : current,
-                    )}
+              taskSections.map((section) =>
+                section.items.length > 0 ? (
+                  <section
+                    className={`task-section${section.status === "done" ? " is-done" : ""}`}
+                    key={section.status}
                   >
-                    <button
-                      className="task-row__select"
-                      onClick={() => handleTaskClick(taskItem)}
-                    >
-                      <span className="task-row__title">{taskItem.title}</span>
-                    </button>
-                    <button
-                      className={`task-row__toggle${isDone ? " is-active" : ""}`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void handleTaskCompletionToggle(taskItem);
-                      }}
-                      aria-label={isDone ? t.markTaskUndone : t.markTaskDone}
-                      title={isDone ? t.markTaskUndone : t.markTaskDone}
-                    >
-                      <span className="task-row__toggle-dot" />
-                    </button>
-                  </div>
-                );
-              })
+                    <div className="task-section__header">
+                      <h3>{section.title}</h3>
+                      <span>{section.items.length}</span>
+                    </div>
+
+                    <div className="task-section__list">
+                      {section.items.map((taskItem) => {
+                        const isHovered = hoveredTaskId === taskItem.id;
+                        const isSelected = selectedTaskId === taskItem.id;
+                        const isDone = taskItem.status === "done";
+                        const confidence = Math.round(taskItem.confidence * 100);
+                        const confidenceLevel =
+                          confidence >= 78 ? "high" : confidence >= 60 ? "medium" : "low";
+
+                        return (
+                          <div
+                            key={taskItem.id}
+                            ref={(node) => {
+                              taskRowRefs.current.set(taskItem.id, node);
+                            }}
+                            className={`task-row${isHovered ? " is-hovered" : ""}${
+                              isSelected ? " is-selected" : ""
+                            }${isDone ? " is-done" : ""}`}
+                            onMouseEnter={() => setHoveredTaskId(taskItem.id)}
+                            onMouseLeave={() => setHoveredTaskId((current) =>
+                              current === taskItem.id ? null : current,
+                            )}
+                          >
+                            <button
+                              className="task-row__select"
+                              onClick={() => handleTaskClick(taskItem)}
+                            >
+                              <div className="task-row__copy">
+                                <span className="task-row__title">{taskItem.title}</span>
+                                <div className="task-row__meta">
+                                  {taskItem.timeHint ? <span>{taskItem.timeHint}</span> : null}
+                                  <span>{t.sourceCount(taskItem.sourceCardIds.length)}</span>
+                                  <span
+                                    className="task-row__confidence"
+                                    data-level={confidenceLevel}
+                                  >
+                                    {confidence}%
+                                  </span>
+                                </div>
+                              </div>
+                            </button>
+                            <div className="task-row__actions">
+                              <button
+                                className={`task-row__toggle${isDone ? " is-active" : ""}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void handleTaskCompletionToggle(taskItem);
+                                }}
+                                aria-label={isDone ? t.markTaskUndone : t.markTaskDone}
+                                title={isDone ? t.markTaskUndone : t.markTaskDone}
+                              >
+                                <span className="task-row__toggle-dot" />
+                              </button>
+                              <button
+                                className="task-row__delete"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void handleTaskDelete(taskItem);
+                                }}
+                                aria-label={t.deleteTask}
+                                title={t.deleteTask}
+                              >
+                                <TrashIcon />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ) : null,
+              )
             )}
           </div>
+        </aside>
 
+        <aside
+          className={`inspector-drawer${
+            isInspectorOpen && hasInspectorContent ? " is-open" : ""
+          }`}
+          aria-hidden={!isInspectorOpen || !hasInspectorContent}
+        >
+          <div className="inspector-drawer__surface">
+            <div className="inspector-drawer__header">
+              <div>
+                <p className="pane-label">{t.inspectorLabel}</p>
+                <h3>{detailTitle}</h3>
+                <p>{inspectorSummary}</p>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setIsInspectorOpen(false)}
+                aria-label={t.closeInspector}
+                title={t.closeInspector}
+              >
+                <CloseIcon />
+              </button>
+            </div>
+
+            {hasInspectorContent ? (
+              <div className="inspector-drawer__body">
+                {activeTask ? (
+                  <div className="status-switcher" role="tablist" aria-label={t.taskStatusAria}>
+                    {TASK_STATUS_ORDER.map((status) => (
+                      <button
+                        key={status}
+                        className={status === activeTask.status ? "is-active" : ""}
+                        onClick={() => void handleTaskStatusChange(activeTask.id, status)}
+                      >
+                        {t.taskSections[status].title}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+
+                <section className="inspector-card inspector-card--meta">
+                  <span className="detail-label">{t.created}</span>
+                  <p className="inspector-meta-value">
+                    {inspectorCreatedAt
+                      ? formatDateTime(inspectorCreatedAt, language)
+                      : "--"}
+                  </p>
+                </section>
+
+                {activeTask ? (
+                  <section className="inspector-card">
+                    <span className="detail-label">{t.taskTitleLabel}</span>
+                    {editingTaskField === "title" ? (
+                      <input
+                        id="task-title-input"
+                        className="detail-input"
+                        value={draftTaskTitle}
+                        onChange={(event) => setDraftTaskTitle(event.target.value)}
+                        onBlur={() => void handleTaskTitleCommit()}
+                        onKeyDown={handleTaskTitleKeyDown}
+                        autoFocus
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="detail-display detail-display--title"
+                        onClick={() => setEditingTaskField("title")}
+                        aria-label={t.taskTitleLabel}
+                        title={t.taskTitleLabel}
+                      >
+                        <span>{activeTask.title}</span>
+                      </button>
+                    )}
+                  </section>
+                ) : null}
+
+                {detailCaptureStatus && detailCaptureStatus !== "done" ? (
+                  <section className="inspector-card">
+                    <span className="detail-label">{t.pipeline}</span>
+                    <div className="pipeline-banner" data-state={detailCaptureStatus}>
+                      {detailCaptureStatus === "failed"
+                        ? inspectedCapture?.errorMessage || t.pipelineReviewFallback
+                        : t.pipelineProcessing}
+                    </div>
+                  </section>
+                ) : null}
+
+                {activeTask ? (
+                  <section className="inspector-card">
+                    <span className="detail-label">{t.aiSummary}</span>
+                    {editingTaskField === "summary" ? (
+                      <textarea
+                        id="task-summary-input"
+                        className="detail-textarea detail-textarea--summary"
+                        value={draftTaskSummary}
+                        onChange={(event) => setDraftTaskSummary(event.target.value)}
+                        onBlur={() => void handleTaskSummaryCommit()}
+                        onKeyDown={handleTaskSummaryKeyDown}
+                        autoFocus
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="detail-display detail-display--summary"
+                        onClick={() => setEditingTaskField("summary")}
+                        aria-label={t.aiSummary}
+                        title={t.aiSummary}
+                      >
+                        <span>{activeTask.summary}</span>
+                      </button>
+                    )}
+                  </section>
+                ) : inspectedCapture?.aiSummary ? (
+                  <section className="inspector-card">
+                    <span className="detail-label">{t.aiSummary}</span>
+                    <p className="inspector-summary">{inspectedCapture.aiSummary}</p>
+                  </section>
+                ) : null}
+
+                {attachmentPreviewUrl ? (
+                  <section className="inspector-card">
+                    <div className="attachment-preview__header">
+                      <span className="detail-label">{t.attachmentPreview}</span>
+                      <button
+                        className="secondary-button secondary-button--compact"
+                        onClick={() => setLightboxImageUrl(attachmentPreviewUrl)}
+                      >
+                        {t.openImagePreview}
+                      </button>
+                    </div>
+                    <button
+                      className="attachment-preview"
+                      onClick={() => setLightboxImageUrl(attachmentPreviewUrl)}
+                    >
+                      <img src={attachmentPreviewUrl} alt={detailTitle} />
+                    </button>
+                  </section>
+                ) : null}
+
+                {inspectedCapture ? (
+                  <section className="inspector-card inspector-card--stretch">
+                    <label className="detail-label" htmlFor="source-text-input">
+                      {t.capturedText}
+                    </label>
+                    <textarea
+                      id="source-text-input"
+                      className="detail-textarea"
+                      value={draftSourceText}
+                      onChange={(event) => setDraftSourceText(event.target.value)}
+                      onBlur={() => void handleSourceTextCommit()}
+                      onKeyDown={handleSourceTextKeyDown}
+                    />
+                  </section>
+                ) : null}
+
+                {inspectedSourceCards.length ? (
+                  <section className="inspector-card">
+                    <span className="detail-label">{t.sourceCards}</span>
+                    <div className="detail-tags">
+                      {inspectedSourceCards.map((sourceCard) => (
+                        <span className="detail-tag" key={sourceCard.id}>
+                          {sourceCard.title}
+                        </span>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
+
+                {inspectedCapture?.tags?.length ? (
+                  <section className="inspector-card">
+                    <span className="detail-label">{t.tags}</span>
+                    <div className="detail-tags">
+                      {inspectedCapture.tags.map((tag) => (
+                        <span className="detail-tag" key={tag}>
+                          #{tag}
+                        </span>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
+              </div>
+            ) : (
+              <div className="inspector-empty">
+                <h3>{t.pickTask}</h3>
+                <p>{t.hoverToInspect}</p>
+              </div>
+            )}
+          </div>
         </aside>
       </div>
 
@@ -1191,6 +1778,107 @@ export default function App() {
                   );
                 })}
               </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isManualComposerOpen ? (
+        <div
+          className="composer-overlay"
+          onClick={() => setIsManualComposerOpen(false)}
+          role="presentation"
+        >
+          <section
+            className="composer-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t.manualAddTitle}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="composer-panel__header">
+              <div>
+                <p className="pane-label">{t.manualAdd}</p>
+                <h3>{t.manualAddTitle}</h3>
+                <p>{t.manualAddDescription}</p>
+              </div>
+              <button
+                className="secondary-button"
+                onClick={() => setIsManualComposerOpen(false)}
+              >
+                {t.manualAddCancel}
+              </button>
+            </div>
+
+            <div className="composer-panel__body">
+              <label className="detail-label" htmlFor="manual-capture-input">
+                {t.sourceCanvasLabel}
+              </label>
+              <textarea
+                id="manual-capture-input"
+                className="detail-textarea composer-textarea"
+                value={manualCaptureDraft}
+                placeholder={t.manualAddPlaceholder}
+                onChange={(event) => setManualCaptureDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" || (!event.metaKey && !event.ctrlKey)) {
+                    return;
+                  }
+
+                  event.preventDefault();
+                  void handleManualCaptureSubmit();
+                }}
+                autoFocus
+              />
+              <p className="composer-panel__hint">{t.manualAddHint}</p>
+            </div>
+
+            <div className="composer-panel__actions">
+              <button
+                className="secondary-button"
+                onClick={() => setIsManualComposerOpen(false)}
+              >
+                {t.manualAddCancel}
+              </button>
+              <button
+                className="capture-button"
+                onClick={() => void handleManualCaptureSubmit()}
+                disabled={!manualCaptureDraft.trim()}
+              >
+                {t.manualAddSubmit}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {lightboxImageUrl ? (
+        <div
+          className="image-lightbox"
+          onClick={() => setLightboxImageUrl(null)}
+          role="presentation"
+        >
+          <section
+            className="image-lightbox__panel"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t.attachmentPreview}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="image-lightbox__header">
+              <div>
+                <p className="pane-label">{t.attachmentPreview}</p>
+                <h3>{detailTitle}</h3>
+              </div>
+              <button
+                className="secondary-button"
+                onClick={() => setLightboxImageUrl(null)}
+              >
+                {t.closeImagePreview}
+              </button>
+            </div>
+            <div className="image-lightbox__body">
+              <img src={lightboxImageUrl} alt={detailTitle} />
             </div>
           </section>
         </div>
