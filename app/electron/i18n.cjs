@@ -30,6 +30,11 @@ const getDesktopCopy = (language) => {
       fallbackQuickTitle: "Quick capture",
       imageCaptureStored: "Image capture stored on the canvas.",
       capturedForLaterReview: "Captured for later review.",
+      aiConfigIncomplete:
+        "AI configuration is incomplete. Please provide base URL, API key, and model.",
+      remoteAiInvalidResponse: "The AI response could not be parsed.",
+      remoteAiRequestFailed: (status) =>
+        status ? `The AI service request failed (${status}).` : "The AI service request failed.",
       sourceLinkedToast: (count) =>
         `Linked to ${count} source card${count > 1 ? "s" : ""}.`,
       appTitle: "Canvas Inbox",
@@ -57,6 +62,10 @@ const getDesktopCopy = (language) => {
     fallbackQuickTitle: "快速收录",
     imageCaptureStored: "图片已收纳到画布。",
     capturedForLaterReview: "已收纳，稍后再处理。",
+    aiConfigIncomplete: "AI 配置还不完整，请填写 Base URL、API Key 和模型。",
+    remoteAiInvalidResponse: "AI 返回结果无法解析。",
+    remoteAiRequestFailed: (status) =>
+      status ? `AI 服务请求失败（${status}）。` : "AI 服务请求失败。",
     sourceLinkedToast: (count) => `已关联 ${count} 个来源卡片。`,
     appTitle: "Canvas Inbox",
   };

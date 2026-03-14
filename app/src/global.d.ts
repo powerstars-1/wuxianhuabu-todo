@@ -4,6 +4,7 @@ import type {
   DeleteSourceCardPayload,
   DeleteTaskPayload,
   CreateManualTextCapturePayload,
+  UpdateAiConfigPayload,
   UpdateLanguagePayload,
   UpdateSourceCardPositionPayload,
   UpdateSourceCardTextPayload,
@@ -16,10 +17,25 @@ import type {
 declare global {
   interface Window {
     desktopApi: {
+      getWindowState: () => Promise<{
+        isMaximized: boolean;
+      }>;
+      minimizeWindow: () => Promise<{
+        isMaximized: boolean;
+      }>;
+      toggleMaximizeWindow: () => Promise<{
+        isMaximized: boolean;
+      }>;
+      closeWindow: () => Promise<{
+        isMaximized: boolean;
+      }>;
       getWorkspaceSnapshot: () => Promise<WorkspaceSnapshot>;
       captureClipboard: () => Promise<WorkspaceSnapshot>;
       createManualTextCapture: (
         payload: CreateManualTextCapturePayload,
+      ) => Promise<WorkspaceSnapshot>;
+      updateAiConfig: (
+        payload: UpdateAiConfigPayload,
       ) => Promise<WorkspaceSnapshot>;
       getAttachmentDataUrl: (attachmentId: string) => Promise<string | null>;
       updateLanguage: (payload: UpdateLanguagePayload) => Promise<WorkspaceSnapshot>;
@@ -44,6 +60,9 @@ declare global {
       ) => Promise<WorkspaceSnapshot>;
       onWorkspaceUpdated: (
         listener: (snapshot: WorkspaceSnapshot) => void,
+      ) => () => void;
+      onWindowStateChanged: (
+        listener: (state: { isMaximized: boolean }) => void,
       ) => () => void;
     };
   }

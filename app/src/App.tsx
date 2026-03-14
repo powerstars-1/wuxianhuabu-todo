@@ -19,10 +19,14 @@ import type {
 import { DEFAULT_LANGUAGE, getMessages } from "./i18n";
 import {
   buildScene,
+  getTaskCardLayouts,
   SOURCE_CARD_HEIGHT,
   SOURCE_CARD_WIDTH,
+  TASK_CARD_HEIGHT,
+  TASK_CARD_WIDTH,
 } from "./lib/buildScene";
 import type {
+  AiProvider,
   AppLanguage,
   Capture,
   CaptureStatus,
@@ -56,6 +60,22 @@ type LoadedImageAttachment = {
   file: BinaryFileData;
   width: number;
   height: number;
+};
+
+type RectLike = {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+};
+
+type ConnectorPath = {
+  id: string;
+  d: string;
+  kind: "task-row" | "task-branch";
+  isActive: boolean;
 };
 
 const EMPTY_SCROLL_STATE: ScrollState = {
@@ -103,6 +123,26 @@ const getPrimaryCapture = (
   );
 };
 
+const getCanvasSourceCards = (workspace: WorkspaceSnapshot) =>
+  workspace.sourceCards.map((sourceCard) => {
+    if (sourceCard.linkedTaskIds.length !== 1) {
+      return sourceCard;
+    }
+
+    const linkedTask =
+      workspace.taskItems.find((taskItem) => taskItem.id === sourceCard.linkedTaskIds[0]) ||
+      null;
+
+    if (!linkedTask || linkedTask.title === sourceCard.title) {
+      return sourceCard;
+    }
+
+    return {
+      ...sourceCard,
+      title: linkedTask.title,
+    };
+  });
+
 const getSelectedSourceCardIdFromSelection = (
   workspace: WorkspaceSnapshot,
   elements: readonly SceneElementLike[],
@@ -132,6 +172,39 @@ const getSelectedSourceCardIdFromSelection = (
         workspace.sourceCards.some((card) => card.id === candidateSourceCardId)
       ) {
         return candidateSourceCardId;
+      }
+
+      return null;
+    })
+    .find((value): value is string => Boolean(value));
+};
+
+const getSelectedTaskIdFromSelection = (
+  workspace: WorkspaceSnapshot,
+  elements: readonly SceneElementLike[],
+  selectedElementIds: Readonly<Record<string, true>>,
+) => {
+  return Object.keys(selectedElementIds)
+    .map((selectedElementId) => {
+      if (workspace.taskItems.some((taskItem) => taskItem.id === selectedElementId)) {
+        return selectedElementId;
+      }
+
+      const selectedElement = elements.find(
+        (candidate) =>
+          candidate.id === selectedElementId && !candidate.isDeleted,
+      );
+      const taskIdFromCustomData =
+        typeof selectedElement?.customData?.taskId === "string"
+          ? selectedElement.customData.taskId
+          : null;
+      const candidateTaskId = taskIdFromCustomData || selectedElement?.containerId || null;
+
+      if (
+        candidateTaskId &&
+        workspace.taskItems.some((taskItem) => taskItem.id === candidateTaskId)
+      ) {
+        return candidateTaskId;
       }
 
       return null;
@@ -171,31 +244,12 @@ const isStandaloneTextElement = (
     return false;
   }
 
+  if (typeof element.customData?.taskId === "string") {
+    return false;
+  }
+
   return !workspace.sourceCards.some((card) => card.id === element.id);
 };
-
-const getBoundTextElement = (
-  elements: readonly SceneElementLike[],
-  sourceCardId: string,
-) =>
-  elements.find(
-    (candidate) =>
-      candidate.type === "text" &&
-      candidate.containerId === sourceCardId &&
-      !candidate.isDeleted,
-  );
-
-const getEditableSourceTextElement = (
-  elements: readonly SceneElementLike[],
-  sourceCardId: string,
-) =>
-  getBoundTextElement(elements, sourceCardId) ||
-  elements.find(
-    (candidate) =>
-      candidate.type === "text" &&
-      candidate.customData?.sourceCardId === sourceCardId &&
-      !candidate.isDeleted,
-  );
 
 const readImageDimensions = (dataUrl: string) =>
   new Promise<{ width: number; height: number }>((resolve) => {
@@ -217,6 +271,130 @@ const readImageDimensions = (dataUrl: string) =>
 
     image.src = dataUrl;
   });
+
+const toRelativeRect = (rect: RectLike, containerRect: RectLike): RectLike => ({
+  left: rect.left - containerRect.left,
+  top: rect.top - containerRect.top,
+  right: rect.right - containerRect.left,
+  bottom: rect.bottom - containerRect.top,
+  width: rect.width,
+  height: rect.height,
+});
+
+const getRectCenter = (rect: RectLike) => ({
+  x: rect.left + rect.width / 2,
+  y: rect.top + rect.height / 2,
+});
+
+const getRectBoundaryPoint = (
+  rect: RectLike,
+  target: {
+    x: number;
+    y: number;
+  },
+) => {
+  const center = getRectCenter(rect);
+  const deltaX = target.x - center.x;
+  const deltaY = target.y - center.y;
+  const halfWidth = rect.width / 2;
+  const halfHeight = rect.height / 2;
+
+  if (deltaX === 0 && deltaY === 0) {
+    return center;
+  }
+
+  const scale =
+    1 /
+    Math.max(
+      Math.abs(deltaX) / Math.max(halfWidth, 1),
+      Math.abs(deltaY) / Math.max(halfHeight, 1),
+    );
+
+  return {
+    x: center.x + deltaX * scale,
+    y: center.y + deltaY * scale,
+  };
+};
+
+const buildConnectorPath = (
+  startPoint: { x: number; y: number },
+  endPoint: { x: number; y: number },
+) => {
+  const deltaX = endPoint.x - startPoint.x;
+  const controlOffset = Math.max(54, Math.min(180, Math.abs(deltaX) * 0.42));
+  const startControlX = startPoint.x + (deltaX >= 0 ? controlOffset : -controlOffset);
+  const endControlX = endPoint.x - (deltaX >= 0 ? controlOffset : -controlOffset);
+
+  return `M ${startPoint.x} ${startPoint.y} C ${startControlX} ${startPoint.y}, ${endControlX} ${endPoint.y}, ${endPoint.x} ${endPoint.y}`;
+};
+
+const getSceneRectInWorkspace = ({
+  x,
+  y,
+  width,
+  height,
+  canvasRect,
+  workspaceRect,
+  scrollState,
+  viewportState,
+}: {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  canvasRect: DOMRect;
+  workspaceRect: DOMRect;
+  scrollState: ScrollState;
+  viewportState:
+    | (AppState & {
+        zoom: Zoom;
+      })
+    | null;
+}) => {
+  const topLeft = sceneCoordsToViewportCoords(
+    {
+      sceneX: x,
+      sceneY: y,
+    },
+    {
+      zoom: viewportState?.zoom || ({ value: scrollState.zoom as Zoom["value"] } satisfies Zoom),
+      offsetLeft: canvasRect.left,
+      offsetTop: canvasRect.top,
+      scrollX: viewportState?.scrollX ?? scrollState.scrollX,
+      scrollY: viewportState?.scrollY ?? scrollState.scrollY,
+    },
+  );
+  const bottomRight = sceneCoordsToViewportCoords(
+    {
+      sceneX: x + width,
+      sceneY: y + height,
+    },
+    {
+      zoom: viewportState?.zoom || ({ value: scrollState.zoom as Zoom["value"] } satisfies Zoom),
+      offsetLeft: canvasRect.left,
+      offsetTop: canvasRect.top,
+      scrollX: viewportState?.scrollX ?? scrollState.scrollX,
+      scrollY: viewportState?.scrollY ?? scrollState.scrollY,
+    },
+  );
+
+  return {
+    left: topLeft.x - workspaceRect.left,
+    top: topLeft.y - workspaceRect.top,
+    right: bottomRight.x - workspaceRect.left,
+    bottom: bottomRight.y - workspaceRect.top,
+    width: bottomRight.x - topLeft.x,
+    height: bottomRight.y - topLeft.y,
+  };
+};
+
+const isRectVisibleInCanvas = (rect: RectLike, canvasRect: RectLike) =>
+  !(
+    rect.right < canvasRect.left ||
+    rect.left > canvasRect.right ||
+    rect.bottom < canvasRect.top ||
+    rect.top > canvasRect.bottom
+  );
 
 const TrashIcon = () => (
   <svg
@@ -251,6 +429,49 @@ const CloseIcon = () => (
   </svg>
 );
 
+const MinimizeIcon = () => (
+  <svg
+    aria-hidden="true"
+    viewBox="0 0 16 16"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.5"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M4 8.75h8" />
+  </svg>
+);
+
+const MaximizeIcon = () => (
+  <svg
+    aria-hidden="true"
+    viewBox="0 0 16 16"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.45"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <rect x="3.75" y="3.75" width="8.5" height="8.5" rx="1.2" />
+  </svg>
+);
+
+const RestoreIcon = () => (
+  <svg
+    aria-hidden="true"
+    viewBox="0 0 16 16"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.35"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M5.25 5.25h5.5a1 1 0 0 1 1 1v5.5" />
+    <path d="M10.75 7.25v3.5a1 1 0 0 1-1 1h-4.5a1 1 0 0 1-1-1v-4.5a1 1 0 0 1 1-1h3.5" />
+  </svg>
+);
+
 export default function App() {
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot | null>(null);
   const [hoveredTaskId, setHoveredTaskId] = useState<string | null>(null);
@@ -264,9 +485,19 @@ export default function App() {
   const [isManualComposerOpen, setIsManualComposerOpen] = useState(false);
   const [manualCaptureDraft, setManualCaptureDraft] = useState("");
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [draftAiProvider, setDraftAiProvider] = useState<AiProvider>("local");
+  const [draftAiBaseUrl, setDraftAiBaseUrl] = useState("");
+  const [draftAiApiKey, setDraftAiApiKey] = useState("");
+  const [draftAiModel, setDraftAiModel] = useState("");
+  const [aiSaveState, setAiSaveState] = useState<"idle" | "saving" | "saved">("idle");
+  const [aiSaveError, setAiSaveError] = useState<string | null>(null);
   const [isInspectorOpen, setIsInspectorOpen] = useState(false);
+  const [isWindowMaximized, setIsWindowMaximized] = useState(false);
   const [draftTaskTitle, setDraftTaskTitle] = useState("");
   const [draftTaskSummary, setDraftTaskSummary] = useState("");
+  const [taskCardPositionsById, setTaskCardPositionsById] = useState<
+    Record<string, { x: number; y: number }>
+  >({});
   const [editingTaskField, setEditingTaskField] = useState<"title" | "summary" | null>(
     null,
   );
@@ -279,7 +510,6 @@ export default function App() {
   const canvasPaneRef = useRef<HTMLDivElement | null>(null);
   const taskRowRefs = useRef(new Map<string, HTMLDivElement | null>());
   const pendingPositionUpdatesRef = useRef(new Map<string, PositionUpdate>());
-  const pendingSourceTextUpdatesRef = useRef(new Set<string>());
   const processedManualTextIdsRef = useRef(new Set<string>());
   const creatingManualTextIdsRef = useRef(new Set<string>());
   const lastAutoFocusKeyRef = useRef<string | null>(null);
@@ -295,7 +525,10 @@ export default function App() {
     let disposed = false;
 
     const hydrate = async () => {
-      const snapshot = await window.desktopApi.getWorkspaceSnapshot();
+      const [snapshot, windowState] = await Promise.all([
+        window.desktopApi.getWorkspaceSnapshot(),
+        window.desktopApi.getWindowState(),
+      ]);
 
       if (disposed) {
         return;
@@ -303,26 +536,53 @@ export default function App() {
 
       startTransition(() => {
         setWorkspace(snapshot);
+        setIsWindowMaximized(windowState.isMaximized);
       });
     };
 
     void hydrate();
 
-    const unsubscribe = window.desktopApi.onWorkspaceUpdated((snapshot) => {
+    const unsubscribeWorkspace = window.desktopApi.onWorkspaceUpdated((snapshot) => {
       startTransition(() => {
         setWorkspace(snapshot);
+      });
+    });
+    const unsubscribeWindowState = window.desktopApi.onWindowStateChanged((state) => {
+      startTransition(() => {
+        setIsWindowMaximized(state.isMaximized);
       });
     });
 
     return () => {
       disposed = true;
-      unsubscribe();
+      unsubscribeWorkspace();
+      unsubscribeWindowState();
     };
   }, []);
 
   useEffect(() => {
     document.documentElement.lang = language;
   }, [language]);
+
+  useEffect(() => {
+    if (!isSettingsOpen) {
+      return;
+    }
+
+    setAiSaveState("idle");
+    setAiSaveError(null);
+  }, [isSettingsOpen]);
+
+  useEffect(() => {
+    if (!workspace) {
+      return;
+    }
+
+    setDraftAiProvider(workspace.ai.provider);
+    setDraftAiBaseUrl(workspace.ai.baseUrl);
+    setDraftAiApiKey(workspace.ai.apiKey);
+    setDraftAiModel(workspace.ai.model);
+  }, [workspace?.ai]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -418,6 +678,11 @@ export default function App() {
     }
 
     if (!selectedTaskId && selectedSourceCardId) {
+      const linkedTaskId =
+        workspace.sourceCards.find((sourceCard) => sourceCard.id === selectedSourceCardId)
+          ?.linkedTaskIds[0] || null;
+
+      setSelectedTaskId(linkedTaskId);
       return;
     }
 
@@ -467,6 +732,7 @@ export default function App() {
       return;
     }
 
+    const canvasSourceCards = getCanvasSourceCards(workspace);
     const imageAttachmentMetaById = Object.fromEntries(
       Object.entries(imageAttachmentsById).map(([attachmentId, attachment]) => [
         attachmentId,
@@ -476,16 +742,35 @@ export default function App() {
         },
       ]),
     );
-    const activeTaskId = hoveredTaskId || selectedTaskId;
-    const activeTask =
-      workspace.taskItems.find((taskItem) => taskItem.id === activeTaskId) || null;
+    const previewTaskId = hoveredTaskId || selectedTaskId;
+    const previewTask =
+      workspace.taskItems.find((taskItem) => taskItem.id === previewTaskId) || null;
     const activeSourceIds =
-      activeTask?.sourceCardIds ||
+      previewTask?.sourceCardIds ||
       (selectedSourceCardId ? [selectedSourceCardId] : []);
+    const focusedSourceCardId =
+      selectedSourceCardId ||
+      (selectedTaskId
+        ? workspace.taskItems.find((taskItem) => taskItem.id === selectedTaskId)
+            ?.sourceCardIds[0] || null
+        : null) ||
+      (workspace.ui.lastCaptureId
+        ? workspace.sourceCards.find(
+            (sourceCard) => sourceCard.captureId === workspace.ui.lastCaptureId,
+          )?.id || null
+        : null);
+    const taskCardLayouts = getTaskCardLayouts(
+      workspace.sourceCards,
+      workspace.taskItems,
+      focusedSourceCardId,
+      previewTaskId,
+      taskCardPositionsById,
+    );
 
     canvasApi.updateScene({
       elements: buildScene(
-        workspace.sourceCards,
+        canvasSourceCards,
+        taskCardLayouts,
         activeSourceIds,
         captureStatusById,
         imageAttachmentMetaById,
@@ -501,6 +786,7 @@ export default function App() {
     language,
     selectedTaskId,
     selectedSourceCardId,
+    taskCardPositionsById,
     workspace,
   ]);
 
@@ -660,7 +946,11 @@ export default function App() {
     requestAnimationFrame(() => {
       const targetElements = canvasApi
         .getSceneElements()
-        .filter((element) => selectedTask.sourceCardIds.includes(element.id));
+        .filter(
+          (element) =>
+            selectedTask.sourceCardIds.includes(element.id) ||
+            element.id === selectedTask.id,
+        );
 
       if (targetElements.length === 0) {
         return;
@@ -677,6 +967,17 @@ export default function App() {
       return;
     }
 
+    setTaskCardPositionsById((current) => {
+      const liveTaskIds = new Set(workspace.taskItems.map((taskItem) => taskItem.id));
+      const nextEntries = Object.entries(current).filter(([taskId]) => liveTaskIds.has(taskId));
+
+      if (nextEntries.length === Object.keys(current).length) {
+        return current;
+      }
+
+      return Object.fromEntries(nextEntries);
+    });
+
     pendingSourceCardDeletesRef.current.forEach((sourceCardId) => {
       if (!workspace.sourceCards.some((sourceCard) => sourceCard.id === sourceCardId)) {
         pendingSourceCardDeletesRef.current.delete(sourceCardId);
@@ -684,9 +985,9 @@ export default function App() {
     });
   }, [workspace]);
 
-  const activeTaskId = hoveredTaskId || selectedTaskId;
-  const activeTask =
-    workspace?.taskItems.find((taskItem) => taskItem.id === activeTaskId) || null;
+  const previewTaskId = hoveredTaskId || selectedTaskId;
+  const selectedTask =
+    workspace?.taskItems.find((taskItem) => taskItem.id === selectedTaskId) || null;
   const taskSections = TASK_STATUS_ORDER.map((status) => ({
     status,
     title: t.taskSections[status].title,
@@ -711,12 +1012,29 @@ export default function App() {
       ? workspace.sourceCards.find((sourceCard) => sourceCard.id === selectedSourceCardId) ||
         null
       : null;
+  const focusedSourceCardId =
+    selectedSourceCardId ||
+    selectedTask?.sourceCardIds[0] ||
+    (workspace?.ui.lastCaptureId
+      ? workspace.sourceCards.find(
+          (sourceCard) => sourceCard.captureId === workspace.ui.lastCaptureId,
+        )?.id || null
+      : null);
   const activeSourceCards =
-    workspace && activeTask
-      ? getSourceCardsForTask(workspace, activeTask)
+    workspace && selectedTask
+      ? getSourceCardsForTask(workspace, selectedTask)
       : selectedSourceCard
         ? [selectedSourceCard]
         : [];
+  const taskCardLayouts = workspace
+    ? getTaskCardLayouts(
+        workspace.sourceCards,
+        workspace.taskItems,
+        focusedSourceCardId,
+        previewTaskId,
+        taskCardPositionsById,
+      )
+    : [];
   const primaryCapture =
     workspace && activeSourceCards.length > 0
       ? getPrimaryCapture(workspace, activeSourceCards)
@@ -731,7 +1049,7 @@ export default function App() {
       ? workspace.captures.find((capture) => capture.id === workspace.ui.lastCaptureId) ||
         null
       : null);
-  const inspectedSourceCards = activeTask
+  const inspectedSourceCards = selectedTask
     ? activeSourceCards
     : selectedSourceCard
       ? [selectedSourceCard]
@@ -741,24 +1059,24 @@ export default function App() {
   const primarySourceCard = inspectedSourceCards[0] || null;
 
   useEffect(() => {
-    setDraftTaskTitle(activeTask?.title || "");
-  }, [activeTask?.id, activeTask?.title]);
+    setDraftTaskTitle(selectedTask?.title || "");
+  }, [selectedTask?.id, selectedTask?.title]);
 
   useEffect(() => {
-    setDraftTaskSummary(activeTask?.summary || "");
-  }, [activeTask?.id, activeTask?.summary]);
+    setDraftTaskSummary(selectedTask?.summary || "");
+  }, [selectedTask?.id, selectedTask?.summary]);
 
   useEffect(() => {
     setDraftSourceText(inspectedCapture?.rawText || "");
   }, [inspectedCapture?.id, inspectedCapture?.rawText]);
 
   useEffect(() => {
-    if (isInspectorOpen && activeTask) {
+    if (isInspectorOpen && selectedTask) {
       return;
     }
 
     setEditingTaskField(null);
-  }, [activeTask, isInspectorOpen]);
+  }, [selectedTask, isInspectorOpen]);
 
   useEffect(() => {
     let disposed = false;
@@ -801,6 +1119,8 @@ export default function App() {
     return canvasApi.onPointerUp(() => {
       const positionUpdates = Array.from(pendingPositionUpdatesRef.current.values());
       pendingPositionUpdatesRef.current.clear();
+      const elements = canvasApi.getSceneElements();
+      const selectedElementIds = canvasApi.getAppState().selectedElementIds;
 
       if (positionUpdates.length > 0) {
         void Promise.all(
@@ -810,19 +1130,48 @@ export default function App() {
         );
       }
 
+      const canvasSelectedTaskId = getSelectedTaskIdFromSelection(
+        workspace,
+        elements,
+        selectedElementIds,
+      );
+
+      if (canvasSelectedTaskId) {
+        const selectedTask =
+          workspace.taskItems.find((taskItem) => taskItem.id === canvasSelectedTaskId) || null;
+
+        if (!selectedTask) {
+          return;
+        }
+
+        setHoveredTaskId(null);
+        setSelectedTaskId(selectedTask.id);
+        setSelectedSourceCardId(selectedTask.sourceCardIds[0] || null);
+        setIsInspectorOpen(true);
+        return;
+      }
+
       const selectedSourceCardId = getSelectedSourceCardIdFromSelection(
         workspace,
-        canvasApi.getSceneElements(),
-        canvasApi.getAppState().selectedElementIds,
+        elements,
+        selectedElementIds,
       );
 
       if (!selectedSourceCardId) {
         return;
       }
 
+      const currentTaskBelongsToSource = Boolean(
+        selectedTaskId &&
+        workspace.sourceCards
+          .find((card) => card.id === selectedSourceCardId)
+            ?.linkedTaskIds.includes(selectedTaskId),
+      );
       const linkedTaskId =
-        workspace.sourceCards.find((card) => card.id === selectedSourceCardId)
-          ?.linkedTaskIds[0] || null;
+        currentTaskBelongsToSource
+          ? selectedTaskId
+          : workspace.sourceCards.find((card) => card.id === selectedSourceCardId)
+              ?.linkedTaskIds[0] || null;
 
       setHoveredTaskId(null);
       setSelectedSourceCardId(selectedSourceCardId);
@@ -845,6 +1194,21 @@ export default function App() {
 
   const handleCaptureClick = async () => {
     await window.desktopApi.captureClipboard();
+  };
+
+  const handleWindowMinimize = async () => {
+    const state = await window.desktopApi.minimizeWindow();
+    setIsWindowMaximized(state.isMaximized);
+  };
+
+  const handleWindowMaximizeToggle = async () => {
+    const state = await window.desktopApi.toggleMaximizeWindow();
+    setIsWindowMaximized(state.isMaximized);
+  };
+
+  const handleWindowClose = async () => {
+    const state = await window.desktopApi.closeWindow();
+    setIsWindowMaximized(state.isMaximized);
   };
 
   const handleManualCaptureSubmit = async () => {
@@ -872,7 +1236,10 @@ export default function App() {
 
     const targetElements = canvasApi
       .getSceneElements()
-      .filter((element) => taskItem.sourceCardIds.includes(element.id));
+      .filter(
+        (element) =>
+          taskItem.sourceCardIds.includes(element.id) || element.id === taskItem.id,
+      );
 
     if (targetElements.length > 0) {
       canvasApi.scrollToContent(targetElements, {
@@ -912,9 +1279,6 @@ export default function App() {
 
     setHoveredTaskId((current) => (current === taskItem.id ? null : current));
     setSelectedTaskId((current) => (current === taskItem.id ? null : current));
-    setSelectedSourceCardId((current) =>
-      taskItem.sourceCardIds.includes(current || "") ? null : current,
-    );
     await window.desktopApi.deleteTask({
       taskId: taskItem.id,
     });
@@ -927,51 +1291,69 @@ export default function App() {
     setIsSettingsOpen(false);
   };
 
+  const handleAiConfigSave = async () => {
+    setAiSaveState("saving");
+    setAiSaveError(null);
+
+    try {
+      await window.desktopApi.updateAiConfig({
+        provider: draftAiProvider,
+        baseUrl: draftAiBaseUrl,
+        apiKey: draftAiApiKey,
+        model: draftAiModel,
+      });
+      setAiSaveState("saved");
+    } catch (error) {
+      setAiSaveState("idle");
+      setAiSaveError(error instanceof Error ? error.message : t.aiConfigSaveError);
+    }
+  };
+
   const handleTaskTitleCommit = async () => {
-    if (!activeTask) {
+    if (!selectedTask) {
       return;
     }
 
     const normalizedText = draftTaskTitle.trim();
 
     if (!normalizedText) {
-      setDraftTaskTitle(activeTask.title);
+      setDraftTaskTitle(selectedTask.title);
       setEditingTaskField(null);
       return;
     }
 
-    if (normalizedText === activeTask.title) {
+    if (normalizedText === selectedTask.title) {
       setEditingTaskField(null);
       return;
     }
 
     await window.desktopApi.updateTaskText({
-      taskId: activeTask.id,
+      taskId: selectedTask.id,
       text: normalizedText,
     });
     setEditingTaskField(null);
   };
 
   const handleTaskSummaryCommit = async () => {
-    if (!activeTask) {
+    if (!selectedTask) {
       return;
     }
 
     const normalizedSummary = draftTaskSummary.trim();
 
     if (!normalizedSummary) {
-      setDraftTaskSummary(activeTask.summary);
+      setDraftTaskSummary(selectedTask.summary);
       setEditingTaskField(null);
       return;
     }
 
-    if (normalizedSummary === activeTask.summary) {
+    if (normalizedSummary === selectedTask.summary) {
       setEditingTaskField(null);
       return;
     }
 
     await window.desktopApi.updateTaskSummary({
-      taskId: activeTask.id,
+      taskId: selectedTask.id,
       summary: normalizedSummary,
     });
     setEditingTaskField(null);
@@ -1118,10 +1500,70 @@ export default function App() {
       })
       .filter((item): item is PositionUpdate => Boolean(item));
 
+    const changedTaskCardPositions = taskCardLayouts
+      .map((taskCardLayout) => {
+        const element = elements.find(
+          (candidate) =>
+            candidate.id === taskCardLayout.taskId &&
+            !candidate.isDeleted &&
+            typeof candidate.customData?.taskId === "string",
+        );
+
+        if (!element) {
+          return null;
+        }
+
+        if (element.x === taskCardLayout.x && element.y === taskCardLayout.y) {
+          return null;
+        }
+
+        return {
+          taskId: taskCardLayout.taskId,
+          position: {
+            x: Math.round(element.x),
+            y: Math.round(element.y),
+          },
+        };
+      })
+      .filter(
+        (
+          item,
+        ): item is {
+          taskId: string;
+          position: {
+            x: number;
+            y: number;
+          };
+        } => Boolean(item),
+      );
+
     pendingPositionUpdatesRef.current.clear();
     changedPositions.forEach((item) => {
       pendingPositionUpdatesRef.current.set(item.sourceCardId, item);
     });
+
+    if (changedTaskCardPositions.length > 0) {
+      setTaskCardPositionsById((current) => {
+        let didChange = false;
+        const next = { ...current };
+
+        changedTaskCardPositions.forEach((item) => {
+          const currentPosition = next[item.taskId];
+
+          if (
+            currentPosition?.x === item.position.x &&
+            currentPosition?.y === item.position.y
+          ) {
+            return;
+          }
+
+          next[item.taskId] = item.position;
+          didChange = true;
+        });
+
+        return didChange ? next : current;
+      });
+    }
 
     const editingElementId =
       typeof (appState as AppState & { editingElement?: { id?: string | null } | null })
@@ -1133,33 +1575,6 @@ export default function App() {
     if (editingElementId) {
       return;
     }
-
-    workspace.sourceCards.forEach((sourceCard) => {
-      const editableTextElement = getEditableSourceTextElement(
-        elements,
-        sourceCard.id,
-      );
-      const normalizedText = editableTextElement?.text?.trim();
-
-      if (!normalizedText || normalizedText === sourceCard.title) {
-        return;
-      }
-
-      if (pendingSourceTextUpdatesRef.current.has(sourceCard.id)) {
-        return;
-      }
-
-      pendingSourceTextUpdatesRef.current.add(sourceCard.id);
-
-      void window.desktopApi
-        .updateSourceCardText({
-          sourceCardId: sourceCard.id,
-          text: normalizedText,
-        })
-        .finally(() => {
-          pendingSourceTextUpdatesRef.current.delete(sourceCard.id);
-        });
-    });
 
     const manualTextElements = elements.filter((element) => {
       if (!isStandaloneTextElement(workspace, element)) {
@@ -1190,80 +1605,151 @@ export default function App() {
     });
   };
 
-  const connectorPaths =
-    workspace && activeTask && workspaceRef.current && canvasPaneRef.current
-      ? activeSourceCards
-          .map((sourceCard) => {
-            const taskRowRect = taskRowRefs.current
-              .get(activeTask.id)
-              ?.getBoundingClientRect();
-            const workspaceRect = workspaceRef.current?.getBoundingClientRect();
-            const canvasRect = canvasPaneRef.current?.getBoundingClientRect();
+  const taskCardLayoutById = new Map(
+    taskCardLayouts.map((taskCardLayout) => [taskCardLayout.taskId, taskCardLayout]),
+  );
+  const connectorPaths: ConnectorPath[] =
+    workspace && workspaceRef.current && canvasPaneRef.current
+      ? (() => {
+          const workspaceRect = workspaceRef.current.getBoundingClientRect();
+          const canvasRect = canvasPaneRef.current.getBoundingClientRect();
+          const canvasRectRelative = toRelativeRect(canvasRect, workspaceRect);
+          const viewportState = canvasApi?.getAppState() || null;
+          const branchPaths = taskCardLayouts.reduce<ConnectorPath[]>(
+            (paths, taskCardLayout) => {
+              const sourceCard =
+                workspace.sourceCards.find(
+                  (candidate) => candidate.id === taskCardLayout.sourceCardId,
+                ) || null;
 
-            if (!taskRowRect || !workspaceRect || !canvasRect) {
-              return null;
-            }
+              if (!sourceCard) {
+                return paths;
+              }
 
-            const viewportState = canvasApi?.getAppState();
-            const sourceCenter = sceneCoordsToViewportCoords(
-              {
-                sceneX: sourceCard.position.x + SOURCE_CARD_WIDTH / 2,
-                sceneY: sourceCard.position.y + SOURCE_CARD_HEIGHT / 2,
-              },
-              {
-                zoom:
-                  viewportState?.zoom ||
-                  ({ value: scrollState.zoom as Zoom["value"] } satisfies Zoom),
-                offsetLeft: canvasRect.left,
-                offsetTop: canvasRect.top,
-                scrollX: viewportState?.scrollX ?? scrollState.scrollX,
-                scrollY: viewportState?.scrollY ?? scrollState.scrollY,
-              },
-            );
+              const sourceRect = getSceneRectInWorkspace({
+                x: sourceCard.position.x,
+                y: sourceCard.position.y,
+                width: SOURCE_CARD_WIDTH,
+                height: SOURCE_CARD_HEIGHT,
+                canvasRect,
+                workspaceRect,
+                scrollState,
+                viewportState,
+              });
+              const taskRect = getSceneRectInWorkspace({
+                x: taskCardLayout.x,
+                y: taskCardLayout.y,
+                width: TASK_CARD_WIDTH,
+                height: TASK_CARD_HEIGHT,
+                canvasRect,
+                workspaceRect,
+                scrollState,
+                viewportState,
+              });
 
-            const startX = taskRowRect.left - workspaceRect.left;
-            const startY = taskRowRect.top + taskRowRect.height / 2 - workspaceRect.top;
-            const endX = sourceCenter.x - workspaceRect.left;
-            const endY = sourceCenter.y - workspaceRect.top;
+              if (
+                !isRectVisibleInCanvas(sourceRect, canvasRectRelative) ||
+                !isRectVisibleInCanvas(taskRect, canvasRectRelative)
+              ) {
+                return paths;
+              }
 
-            if (
-              sourceCenter.x < canvasRect.left ||
-              sourceCenter.x > canvasRect.right ||
-              sourceCenter.y < canvasRect.top ||
-              sourceCenter.y > canvasRect.bottom
-            ) {
-              return null;
-            }
+              const sourceCenter = getRectCenter(sourceRect);
+              const taskCenter = getRectCenter(taskRect);
+              const startPoint = getRectBoundaryPoint(sourceRect, taskCenter);
+              const endPoint = getRectBoundaryPoint(taskRect, sourceCenter);
 
-            const curveStrength = Math.max(80, Math.abs(startX - endX) * 0.28);
+              paths.push({
+                id: `branch:${sourceCard.id}:${taskCardLayout.taskId}`,
+                d: buildConnectorPath(startPoint, endPoint),
+                kind: "task-branch" as const,
+                isActive: taskCardLayout.isActive,
+              });
 
-            return {
-              id: sourceCard.id,
-              d: `M ${startX} ${startY} C ${startX - curveStrength} ${startY}, ${
-                endX + curveStrength
-              } ${endY}, ${endX} ${endY}`,
-            };
-          })
-          .filter((item): item is { id: string; d: string } => Boolean(item))
+              return paths;
+            },
+            [],
+          );
+          const taskRowPaths =
+            selectedTask && taskCardLayoutById.has(selectedTask.id)
+              ? (() => {
+                  const taskRowNode = taskRowRefs.current.get(selectedTask.id);
+
+                  if (!taskRowNode) {
+                    return [];
+                  }
+
+                  const taskCardLayout = taskCardLayoutById.get(selectedTask.id);
+
+                  if (!taskCardLayout) {
+                    return [];
+                  }
+
+                  const taskRect = getSceneRectInWorkspace({
+                    x: taskCardLayout.x,
+                    y: taskCardLayout.y,
+                    width: TASK_CARD_WIDTH,
+                    height: TASK_CARD_HEIGHT,
+                    canvasRect,
+                    workspaceRect,
+                    scrollState,
+                    viewportState,
+                  });
+
+                  if (!isRectVisibleInCanvas(taskRect, canvasRectRelative)) {
+                    return [];
+                  }
+
+                  const taskRowRect = toRelativeRect(
+                    taskRowNode.getBoundingClientRect(),
+                    workspaceRect,
+                  );
+                  const taskCenter = getRectCenter(taskRect);
+                  const taskRowCenter = getRectCenter(taskRowRect);
+                  const startPoint = getRectBoundaryPoint(taskRowRect, taskCenter);
+                  const endPoint = getRectBoundaryPoint(taskRect, taskRowCenter);
+
+                  return [
+                      {
+                      id: `row:${selectedTask.id}`,
+                      d: buildConnectorPath(startPoint, endPoint),
+                      kind: "task-row" as const,
+                      isActive: true,
+                    },
+                  ];
+                })()
+              : [];
+
+          return [...branchPaths, ...taskRowPaths];
+        })()
       : [];
 
   const detailTitle =
-    activeTask?.title ||
+    selectedTask?.title ||
     inspectedSourceCards[0]?.title ||
     t.pickTask;
+  const selectedTaskChecklist = selectedTask?.checklist || [];
+  const isRemoteAiSelected = draftAiProvider === "openai-compatible";
+  const isAiConfigValid =
+    draftAiProvider === "local" ||
+    Boolean(
+      draftAiBaseUrl.trim() &&
+        draftAiApiKey.trim() &&
+        draftAiModel.trim(),
+    );
   const detailCaptureStatus = inspectedCapture?.aiStatus || null;
-  const hasInspectorContent = Boolean(activeTask || inspectedCapture);
+  const hasInspectorContent = Boolean(selectedTask || inspectedCapture);
   const inspectorSummary =
-    activeTask?.summary ||
+    selectedTask?.summary ||
     inspectedCapture?.aiSummary ||
     t.hoverToInspect;
   const inspectorCreatedAt =
-    activeTask?.createdAt || inspectedCapture?.createdAt || null;
+    selectedTask?.createdAt || inspectedCapture?.createdAt || null;
   const handleTaskTitleKeyDown = (
     event: ReactKeyboardEvent<HTMLInputElement>,
   ) => {
     if (event.key === "Escape") {
-      setDraftTaskTitle(activeTask?.title || "");
+      setDraftTaskTitle(selectedTask?.title || "");
       setEditingTaskField(null);
       event.currentTarget.blur();
       return;
@@ -1281,7 +1767,7 @@ export default function App() {
     event: ReactKeyboardEvent<HTMLTextAreaElement>,
   ) => {
     if (event.key === "Escape") {
-      setDraftTaskSummary(activeTask?.summary || "");
+      setDraftTaskSummary(selectedTask?.summary || "");
       setEditingTaskField(null);
       event.currentTarget.blur();
       return;
@@ -1315,7 +1801,37 @@ export default function App() {
         className={`workspace-body${isInspectorOpen && hasInspectorContent ? " has-inspector" : ""}`}
         ref={workspaceRef}
       >
+        <div className="window-drag-strip" aria-hidden="true" />
         <div className="workspace-backdrop" aria-hidden="true" />
+        <div className="window-controls" aria-label="Window controls">
+          <button
+            type="button"
+            className="window-control window-control--minimize"
+            onClick={() => void handleWindowMinimize()}
+            aria-label={t.minimizeWindow}
+            title={t.minimizeWindow}
+          >
+            <MinimizeIcon />
+          </button>
+          <button
+            type="button"
+            className="window-control window-control--maximize"
+            onClick={() => void handleWindowMaximizeToggle()}
+            aria-label={isWindowMaximized ? t.restoreWindow : t.maximizeWindow}
+            title={isWindowMaximized ? t.restoreWindow : t.maximizeWindow}
+          >
+            {isWindowMaximized ? <RestoreIcon /> : <MaximizeIcon />}
+          </button>
+          <button
+            type="button"
+            className="window-control window-control--close"
+            onClick={() => void handleWindowClose()}
+            aria-label={t.closeWindow}
+            title={t.closeWindow}
+          >
+            <CloseIcon />
+          </button>
+        </div>
         <header className="topbar">
           <div className="topbar__header">
             <div className="topbar__brand">
@@ -1373,7 +1889,13 @@ export default function App() {
 
         <svg className="link-layer" aria-hidden="true">
           {connectorPaths.map((pathItem) => (
-            <path key={pathItem.id} d={pathItem.d} />
+            <path
+              key={pathItem.id}
+              className={`link-layer__path link-layer__path--${pathItem.kind}${
+                pathItem.isActive ? " is-active" : ""
+              }`}
+              d={pathItem.d}
+            />
           ))}
         </svg>
 
@@ -1466,9 +1988,7 @@ export default function App() {
                         const isHovered = hoveredTaskId === taskItem.id;
                         const isSelected = selectedTaskId === taskItem.id;
                         const isDone = taskItem.status === "done";
-                        const confidence = Math.round(taskItem.confidence * 100);
-                        const confidenceLevel =
-                          confidence >= 78 ? "high" : confidence >= 60 ? "medium" : "low";
+                        const checklistCount = taskItem.checklist.length;
 
                         return (
                           <div
@@ -1493,12 +2013,11 @@ export default function App() {
                                 <div className="task-row__meta">
                                   {taskItem.timeHint ? <span>{taskItem.timeHint}</span> : null}
                                   <span>{t.sourceCount(taskItem.sourceCardIds.length)}</span>
-                                  <span
-                                    className="task-row__confidence"
-                                    data-level={confidenceLevel}
-                                  >
-                                    {confidence}%
-                                  </span>
+                                  {checklistCount > 0 ? (
+                                    <span className="task-row__meta-badge">
+                                      {t.checklistCount(checklistCount)}
+                                    </span>
+                                  ) : null}
                                 </div>
                               </div>
                             </button>
@@ -1563,13 +2082,13 @@ export default function App() {
 
             {hasInspectorContent ? (
               <div className="inspector-drawer__body">
-                {activeTask ? (
+                {selectedTask ? (
                   <div className="status-switcher" role="tablist" aria-label={t.taskStatusAria}>
                     {TASK_STATUS_ORDER.map((status) => (
                       <button
                         key={status}
-                        className={status === activeTask.status ? "is-active" : ""}
-                        onClick={() => void handleTaskStatusChange(activeTask.id, status)}
+                        className={status === selectedTask.status ? "is-active" : ""}
+                        onClick={() => void handleTaskStatusChange(selectedTask.id, status)}
                       >
                         {t.taskSections[status].title}
                       </button>
@@ -1586,7 +2105,7 @@ export default function App() {
                   </p>
                 </section>
 
-                {activeTask ? (
+                {selectedTask ? (
                   <section className="inspector-card">
                     <span className="detail-label">{t.taskTitleLabel}</span>
                     {editingTaskField === "title" ? (
@@ -1607,7 +2126,7 @@ export default function App() {
                         aria-label={t.taskTitleLabel}
                         title={t.taskTitleLabel}
                       >
-                        <span>{activeTask.title}</span>
+                        <span>{selectedTask.title}</span>
                       </button>
                     )}
                   </section>
@@ -1624,7 +2143,7 @@ export default function App() {
                   </section>
                 ) : null}
 
-                {activeTask ? (
+                {selectedTask ? (
                   <section className="inspector-card">
                     <span className="detail-label">{t.aiSummary}</span>
                     {editingTaskField === "summary" ? (
@@ -1645,7 +2164,7 @@ export default function App() {
                         aria-label={t.aiSummary}
                         title={t.aiSummary}
                       >
-                        <span>{activeTask.summary}</span>
+                        <span>{selectedTask.summary}</span>
                       </button>
                     )}
                   </section>
@@ -1653,6 +2172,28 @@ export default function App() {
                   <section className="inspector-card">
                     <span className="detail-label">{t.aiSummary}</span>
                     <p className="inspector-summary">{inspectedCapture.aiSummary}</p>
+                  </section>
+                ) : null}
+
+                {selectedTaskChecklist.length > 0 ? (
+                  <section className="inspector-card">
+                    <div className="inspector-card__heading">
+                      <span className="detail-label">{t.taskChecklist}</span>
+                      <span className="inspector-pill">
+                        {t.checklistCount(selectedTaskChecklist.length)}
+                      </span>
+                    </div>
+                    <ol className="task-checklist">
+                      {selectedTaskChecklist.map((item, index) => (
+                        <li
+                          className="task-checklist__item"
+                          key={`${selectedTask?.id || "task"}:${index}:${item}`}
+                        >
+                          <span className="task-checklist__index">{index + 1}</span>
+                          <span className="task-checklist__text">{item}</span>
+                        </li>
+                      ))}
+                    </ol>
                   </section>
                 ) : null}
 
@@ -1777,6 +2318,130 @@ export default function App() {
                     </button>
                   );
                 })}
+              </div>
+            </div>
+
+            <div className="settings-section">
+              <div className="settings-section__heading">
+                <span className="detail-label">{t.aiSection}</span>
+                <p className="settings-section__hint">{t.aiSectionDescription}</p>
+              </div>
+
+              <div className="language-options">
+                <button
+                  className={`language-option${draftAiProvider === "local" ? " is-active" : ""}`}
+                  onClick={() => {
+                    setDraftAiProvider("local");
+                    setAiSaveState("idle");
+                    setAiSaveError(null);
+                  }}
+                >
+                  <div>
+                    <strong>{t.aiProviderLocal}</strong>
+                    <span>{t.aiProviderLocalHint}</span>
+                  </div>
+                  {draftAiProvider === "local" ? <em>{t.languageCurrent}</em> : null}
+                </button>
+
+                <button
+                  className={`language-option${
+                    draftAiProvider === "openai-compatible" ? " is-active" : ""
+                  }`}
+                  onClick={() => {
+                    setDraftAiProvider("openai-compatible");
+                    setAiSaveState("idle");
+                    setAiSaveError(null);
+                  }}
+                >
+                  <div>
+                    <strong>{t.aiProviderOpenAiCompatible}</strong>
+                    <span>{t.aiProviderOpenAiCompatibleHint}</span>
+                  </div>
+                  {draftAiProvider === "openai-compatible" ? (
+                    <em>{t.languageCurrent}</em>
+                  ) : null}
+                </button>
+              </div>
+
+              <div className="settings-form">
+                <div className="settings-form__field">
+                  <label className="detail-label" htmlFor="ai-base-url">
+                    {t.aiBaseUrl}
+                  </label>
+                  <input
+                    id="ai-base-url"
+                    className="detail-input"
+                    value={draftAiBaseUrl}
+                    onChange={(event) => {
+                      setDraftAiBaseUrl(event.target.value);
+                      setAiSaveState("idle");
+                      setAiSaveError(null);
+                    }}
+                    placeholder={t.aiBaseUrlPlaceholder}
+                    disabled={!isRemoteAiSelected}
+                  />
+                </div>
+
+                <div className="settings-form__field">
+                  <label className="detail-label" htmlFor="ai-model">
+                    {t.aiModel}
+                  </label>
+                  <input
+                    id="ai-model"
+                    className="detail-input"
+                    value={draftAiModel}
+                    onChange={(event) => {
+                      setDraftAiModel(event.target.value);
+                      setAiSaveState("idle");
+                      setAiSaveError(null);
+                    }}
+                    placeholder={t.aiModelPlaceholder}
+                    disabled={!isRemoteAiSelected}
+                  />
+                </div>
+
+                <div className="settings-form__field">
+                  <label className="detail-label" htmlFor="ai-api-key">
+                    {t.aiApiKey}
+                  </label>
+                  <input
+                    id="ai-api-key"
+                    className="detail-input"
+                    type="password"
+                    value={draftAiApiKey}
+                    onChange={(event) => {
+                      setDraftAiApiKey(event.target.value);
+                      setAiSaveState("idle");
+                      setAiSaveError(null);
+                    }}
+                    placeholder={t.aiApiKeyPlaceholder}
+                    disabled={!isRemoteAiSelected}
+                  />
+                </div>
+              </div>
+
+              <div className="settings-section__footer">
+                <p
+                  className={`settings-status${
+                    aiSaveError ? " is-error" : aiSaveState === "saved" ? " is-success" : ""
+                  }`}
+                >
+                  {aiSaveError
+                    ? aiSaveError
+                    : aiSaveState === "saved"
+                      ? t.aiConfigSaved
+                      : isRemoteAiSelected
+                        ? t.aiConfigHelperRemote
+                        : t.aiConfigHelperLocal}
+                </p>
+
+                <button
+                  className="capture-button"
+                  onClick={() => void handleAiConfigSave()}
+                  disabled={aiSaveState === "saving" || !isAiConfigValid}
+                >
+                  {aiSaveState === "saving" ? t.aiConfigSaving : t.aiConfigSave}
+                </button>
               </div>
             </div>
           </section>

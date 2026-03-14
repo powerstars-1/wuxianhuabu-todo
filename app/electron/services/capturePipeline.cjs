@@ -6,9 +6,10 @@ const {
 const { getDesktopCopy } = require("../i18n.cjs");
 
 class CapturePipeline {
-  constructor({ repository, aiAdapter }) {
+  constructor({ repository, localAiAdapter, remoteAiAdapter }) {
     this.repository = repository;
-    this.aiAdapter = aiAdapter;
+    this.localAiAdapter = localAiAdapter;
+    this.remoteAiAdapter = remoteAiAdapter;
   }
 
   enqueueClipboardPayload(payload) {
@@ -114,12 +115,19 @@ class CapturePipeline {
   }) {
     // Small delay makes the staged pipeline visible and mirrors future async AI/OCR work.
     await new Promise((resolve) => setTimeout(resolve, 280));
+    const workspaceSnapshot = this.repository.getSnapshot();
+    const aiConfig = workspaceSnapshot.ai;
     const copy = getDesktopCopy(language);
 
-    const analysis = this.aiAdapter.analyzeCapture({
+    const adapter =
+      aiConfig?.provider === "openai-compatible"
+        ? this.remoteAiAdapter
+        : this.localAiAdapter;
+    const analysis = await adapter.analyzeCapture({
       rawText,
       sourceType,
       language,
+      config: aiConfig,
     });
     const createdAt = new Date().toISOString();
 
@@ -134,6 +142,7 @@ class CapturePipeline {
       priority: suggestion.timeHint ? "soon" : "normal",
       sourceCardIds: [sourceCardId],
       confidence: suggestion.confidence,
+      checklist: Array.isArray(suggestion.checklist) ? suggestion.checklist.slice(0, 6) : [],
       createdAt,
       updatedAt: createdAt,
     }));

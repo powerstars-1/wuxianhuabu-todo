@@ -16,8 +16,23 @@ const nowIso = () => new Date().toISOString();
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
+const createDefaultAiConfig = () => ({
+  provider: "local",
+  baseUrl: "https://api.openai.com/v1",
+  apiKey: "",
+  model: "gpt-4o-mini",
+});
+
 const createId = (prefix) =>
   `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+
+const normalizeChecklist = (value) =>
+  Array.isArray(value)
+    ? value
+        .filter((item) => typeof item === "string" && item.trim())
+        .map((item) => item.trim())
+        .slice(0, 6)
+    : [];
 
 const createEmptyWorkspace = () => {
   const createdAt = nowIso();
@@ -34,6 +49,7 @@ const createEmptyWorkspace = () => {
       createdAt,
       updatedAt: createdAt,
     },
+    ai: createDefaultAiConfig(),
     captures: [],
     sourceCards: [],
     taskItems: [],
@@ -61,9 +77,44 @@ const normalizeWorkspace = (workspace) => {
       ...fallback.board,
       ...(workspace.board || {}),
     },
-    captures: Array.isArray(workspace.captures) ? workspace.captures : [],
+    ai: {
+      ...fallback.ai,
+      ...(workspace.ai || {}),
+      provider:
+        workspace.ai?.provider === "openai-compatible"
+          ? "openai-compatible"
+          : fallback.ai.provider,
+      baseUrl:
+        typeof workspace.ai?.baseUrl === "string"
+          ? workspace.ai.baseUrl
+          : fallback.ai.baseUrl,
+      apiKey:
+        typeof workspace.ai?.apiKey === "string"
+          ? workspace.ai.apiKey
+          : fallback.ai.apiKey,
+      model:
+        typeof workspace.ai?.model === "string"
+          ? workspace.ai.model
+          : fallback.ai.model,
+    },
+    captures: Array.isArray(workspace.captures)
+      ? workspace.captures.map((capture) => ({
+          ...capture,
+          aiTaskSuggestions: Array.isArray(capture?.aiTaskSuggestions)
+            ? capture.aiTaskSuggestions.map((taskSuggestion) => ({
+                ...taskSuggestion,
+                checklist: normalizeChecklist(taskSuggestion?.checklist),
+              }))
+            : [],
+        }))
+      : [],
     sourceCards: Array.isArray(workspace.sourceCards) ? workspace.sourceCards : [],
-    taskItems: Array.isArray(workspace.taskItems) ? workspace.taskItems : [],
+    taskItems: Array.isArray(workspace.taskItems)
+      ? workspace.taskItems.map((taskItem) => ({
+          ...taskItem,
+          checklist: normalizeChecklist(taskItem?.checklist),
+        }))
+      : [],
     attachments: Array.isArray(workspace.attachments) ? workspace.attachments : [],
     ui: {
       ...fallback.ui,
@@ -82,6 +133,75 @@ const createCaptureFeedItem = ({ captureId, stage, message }) => ({
   stage,
   message,
   createdAt: nowIso(),
+});
+
+const shorten = (value, maxLength) => {
+  if (!value) {
+    return "";
+  }
+
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength - 1)}...`;
+};
+
+const normalizeCapturedText = (value) =>
+  typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+
+const deriveSourceCardTitle = ({ rawText, sourceType, copy }) => {
+  const firstLine =
+    typeof rawText === "string"
+      ? rawText
+          .split(/\r?\n/)
+          .map((item) => item.trim())
+          .find(Boolean)
+      : "";
+
+  if (firstLine) {
+    return shorten(firstLine, 42);
+  }
+
+  if (sourceType === "image") {
+    return copy.fallbackImageTitle;
+  }
+
+  if (sourceType === "mixed") {
+    return copy.fallbackMixedTitle;
+  }
+
+  return copy.fallbackQuickTitle;
+};
+
+const deriveSourceCardSummary = ({ rawText, sourceType, copy }) => {
+  const normalizedText = normalizeCapturedText(rawText);
+
+  if (normalizedText) {
+    return shorten(normalizedText, 160);
+  }
+
+  if (sourceType === "image") {
+    return copy.imageCaptureStored;
+  }
+
+  return copy.capturedForLaterReview;
+};
+
+const createTaskItemFromSuggestion = ({ suggestion, sourceCardId, createdAt }) => ({
+  id: createId("task"),
+  schemaVersion: SCHEMA_VERSION,
+  boardId: BOARD_ID,
+  title: suggestion.title,
+  summary: suggestion.summary,
+  status: "inbox",
+  timeHint: suggestion.timeHint || null,
+  priority: suggestion.timeHint ? "soon" : "normal",
+  sourceCardIds: [sourceCardId],
+  confidence: suggestion.confidence,
+  checklist: normalizeChecklist(suggestion.checklist),
+  createdAt,
+  updatedAt: createdAt,
 });
 
 class LocalWorkspaceRepository {
@@ -110,7 +230,35 @@ class LocalWorkspaceRepository {
         return createEmptyWorkspace();
       }
 
-      return normalizeWorkspace(parsed);
+      const workspace = normalizeWorkspace(parsed);
+      const copy = getDesktopCopy(workspace.ui.language);
+      const captureById = new Map(
+        workspace.captures.map((capture) => [capture.id, capture]),
+      );
+
+      workspace.sourceCards = workspace.sourceCards.map((sourceCard) => {
+        const capture = captureById.get(sourceCard.captureId);
+
+        if (!capture) {
+          return sourceCard;
+        }
+
+        return {
+          ...sourceCard,
+          title: deriveSourceCardTitle({
+            rawText: capture.rawText,
+            sourceType: sourceCard.sourceType,
+            copy,
+          }),
+          summary: deriveSourceCardSummary({
+            rawText: capture.rawText,
+            sourceType: sourceCard.sourceType,
+            copy,
+          }),
+        };
+      });
+
+      return workspace;
     } catch (error) {
       return createEmptyWorkspace();
     }
@@ -306,6 +454,7 @@ class LocalWorkspaceRepository {
       title: task.title,
       timeHint: task.timeHint,
       confidence: task.confidence,
+      checklist: normalizeChecklist(task.checklist),
     }));
     capture.aiTimeSuggestion = analysis.timeHint;
     capture.tags = analysis.tags;
@@ -313,8 +462,17 @@ class LocalWorkspaceRepository {
     capture.updatedAt = updatedAt;
     capture.errorMessage = null;
 
-    sourceCard.title = analysis.sourceTitle;
-    sourceCard.summary = analysis.sourceSummary;
+    const copy = getDesktopCopy(workspace.ui.language);
+    sourceCard.title = deriveSourceCardTitle({
+      rawText: capture.rawText,
+      sourceType: sourceCard.sourceType,
+      copy,
+    });
+    sourceCard.summary = deriveSourceCardSummary({
+      rawText: capture.rawText,
+      sourceType: sourceCard.sourceType,
+      copy,
+    });
     sourceCard.tags = analysis.tags;
     sourceCard.linkedTaskIds = taskItems.map((task) => task.id);
     sourceCard.updatedAt = updatedAt;
@@ -357,7 +515,17 @@ class LocalWorkspaceRepository {
     capture.processedAt = updatedAt;
     capture.updatedAt = updatedAt;
 
-    sourceCard.summary = errorMessage;
+    const copy = getDesktopCopy(workspace.ui.language);
+    sourceCard.title = deriveSourceCardTitle({
+      rawText: capture.rawText,
+      sourceType: sourceCard.sourceType,
+      copy,
+    });
+    sourceCard.summary = deriveSourceCardSummary({
+      rawText: capture.rawText,
+      sourceType: sourceCard.sourceType,
+      copy,
+    });
     sourceCard.updatedAt = updatedAt;
 
     workspace.ui.captureStatus = "error";
@@ -404,6 +572,86 @@ class LocalWorkspaceRepository {
     return clone(workspace);
   }
 
+  reconcileSourceCardTasks(workspace, sourceCard, analysis, updatedAt) {
+    const desiredSuggestions =
+      Array.isArray(analysis?.taskSuggestions) && analysis.taskSuggestions.length > 0
+        ? analysis.taskSuggestions
+        : [
+            {
+              title: analysis?.sourceTitle || sourceCard.title,
+              summary: analysis?.sourceSummary || sourceCard.summary,
+              confidence: 0.58,
+              timeHint: analysis?.timeHint || null,
+            },
+          ];
+    const existingTasks = sourceCard.linkedTaskIds
+      .map((taskId) => workspace.taskItems.find((item) => item.id === taskId))
+      .filter((item) => Boolean(item));
+    const nextLinkedTaskIds = [];
+    const usedTaskIds = new Set();
+
+    desiredSuggestions.forEach((suggestion, index) => {
+      const existingTask = existingTasks[index];
+
+      if (existingTask) {
+        existingTask.title = suggestion.title;
+        existingTask.summary = suggestion.summary;
+        existingTask.timeHint = suggestion.timeHint || null;
+        existingTask.priority = suggestion.timeHint ? "soon" : "normal";
+        existingTask.confidence = suggestion.confidence;
+        existingTask.checklist = normalizeChecklist(suggestion.checklist);
+        if (!existingTask.sourceCardIds.includes(sourceCard.id)) {
+          existingTask.sourceCardIds = [...existingTask.sourceCardIds, sourceCard.id];
+        }
+        existingTask.updatedAt = updatedAt;
+        nextLinkedTaskIds.push(existingTask.id);
+        usedTaskIds.add(existingTask.id);
+        return;
+      }
+
+      const createdTask = createTaskItemFromSuggestion({
+        suggestion,
+        sourceCardId: sourceCard.id,
+        createdAt: updatedAt,
+      });
+      workspace.taskItems.unshift(createdTask);
+      nextLinkedTaskIds.push(createdTask.id);
+      usedTaskIds.add(createdTask.id);
+    });
+
+    const removedTaskIds = existingTasks
+      .filter((taskItem) => !usedTaskIds.has(taskItem.id))
+      .map((taskItem) => taskItem.id);
+
+    if (removedTaskIds.length > 0) {
+      const removedTaskIdSet = new Set(removedTaskIds);
+
+      workspace.taskItems = workspace.taskItems
+        .map((taskItem) => {
+          if (!removedTaskIdSet.has(taskItem.id)) {
+            return taskItem;
+          }
+
+          const nextSourceCardIds = taskItem.sourceCardIds.filter(
+            (sourceCardId) => sourceCardId !== sourceCard.id,
+          );
+
+          if (nextSourceCardIds.length === 0) {
+            return null;
+          }
+
+          return {
+            ...taskItem,
+            sourceCardIds: nextSourceCardIds,
+            updatedAt,
+          };
+        })
+        .filter((taskItem) => Boolean(taskItem));
+    }
+
+    sourceCard.linkedTaskIds = nextLinkedTaskIds;
+  }
+
   updateAnalyzedSourceCard({ sourceCardId, rawText, analysis }) {
     const workspace = this.readWorkspace();
     const sourceCard = workspace.sourceCards.find((item) => item.id === sourceCardId);
@@ -414,15 +662,18 @@ class LocalWorkspaceRepository {
 
     const capture = workspace.captures.find((item) => item.id === sourceCard.captureId);
     const updatedAt = nowIso();
-    const primarySuggestion = analysis.taskSuggestions[0] || {
-      title: analysis.sourceTitle,
-      summary: analysis.sourceSummary,
-      confidence: 0.58,
-      timeHint: analysis.timeHint || null,
-    };
+    const copy = getDesktopCopy(workspace.ui.language);
 
-    sourceCard.title = analysis.sourceTitle;
-    sourceCard.summary = analysis.sourceSummary;
+    sourceCard.title = deriveSourceCardTitle({
+      rawText,
+      sourceType: sourceCard.sourceType,
+      copy,
+    });
+    sourceCard.summary = deriveSourceCardSummary({
+      rawText,
+      sourceType: sourceCard.sourceType,
+      copy,
+    });
     sourceCard.tags = analysis.tags;
     sourceCard.updatedAt = updatedAt;
 
@@ -434,6 +685,7 @@ class LocalWorkspaceRepository {
         title: task.title,
         timeHint: task.timeHint,
         confidence: task.confidence,
+        checklist: normalizeChecklist(task.checklist),
       }));
       capture.aiTimeSuggestion = analysis.timeHint;
       capture.tags = analysis.tags;
@@ -442,19 +694,8 @@ class LocalWorkspaceRepository {
       capture.errorMessage = null;
     }
 
-    if (sourceCard.linkedTaskIds.length === 1) {
-      const taskItem = workspace.taskItems.find(
-        (item) => item.id === sourceCard.linkedTaskIds[0],
-      );
-
-      if (taskItem) {
-        taskItem.title = primarySuggestion.title;
-        taskItem.summary = primarySuggestion.summary;
-        taskItem.timeHint = primarySuggestion.timeHint || null;
-        taskItem.confidence = primarySuggestion.confidence;
-        taskItem.updatedAt = updatedAt;
-      }
-    }
+    this.reconcileSourceCardTasks(workspace, sourceCard, analysis, updatedAt);
+    this.cleanupWorkspaceRelations(workspace, updatedAt);
 
     workspace.board.updatedAt = updatedAt;
     workspace.updatedAt = updatedAt;
@@ -531,7 +772,6 @@ class LocalWorkspaceRepository {
 
     const updatedAt = nowIso();
     workspace.taskItems = workspace.taskItems.filter((item) => item.id !== taskId);
-    const orphanSourceCardIds = [];
 
     workspace.sourceCards.forEach((sourceCard) => {
       if (!sourceCard.linkedTaskIds.includes(taskId)) {
@@ -539,16 +779,9 @@ class LocalWorkspaceRepository {
       }
 
       sourceCard.linkedTaskIds = sourceCard.linkedTaskIds.filter((id) => id !== taskId);
-
-      if (sourceCard.linkedTaskIds.length === 0) {
-        orphanSourceCardIds.push(sourceCard.id);
-        return;
-      }
-
       sourceCard.updatedAt = updatedAt;
     });
 
-    this.removeSourceCards(workspace, orphanSourceCardIds, updatedAt);
     this.cleanupWorkspaceRelations(workspace, updatedAt);
 
     if (
@@ -603,6 +836,25 @@ class LocalWorkspaceRepository {
       workspace.ui.captureMessage = copy.idleCaptureMessage;
     }
 
+    workspace.board.updatedAt = updatedAt;
+    workspace.updatedAt = updatedAt;
+
+    this.writeWorkspace(workspace);
+
+    return clone(workspace);
+  }
+
+  updateAiConfig(config) {
+    const workspace = this.readWorkspace();
+    const updatedAt = nowIso();
+
+    workspace.ai = {
+      provider:
+        config?.provider === "openai-compatible" ? "openai-compatible" : "local",
+      baseUrl: typeof config?.baseUrl === "string" ? config.baseUrl.trim() : "",
+      apiKey: typeof config?.apiKey === "string" ? config.apiKey.trim() : "",
+      model: typeof config?.model === "string" ? config.model.trim() : "",
+    };
     workspace.board.updatedAt = updatedAt;
     workspace.updatedAt = updatedAt;
 

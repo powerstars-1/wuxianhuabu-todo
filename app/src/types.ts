@@ -3,6 +3,7 @@ export type TaskStatus = "inbox" | "doing" | "done";
 export type CaptureStatus = "queued" | "processing" | "done" | "failed";
 export type CaptureFeedStage = "captured" | "projected" | "failed";
 export type AppLanguage = "zh-CN" | "en-US";
+export type AiProvider = "local" | "openai-compatible";
 
 export interface Board {
   id: string;
@@ -26,6 +27,7 @@ export interface Capture {
     title: string;
     timeHint: string | null;
     confidence: number;
+    checklist: string[];
   }>;
   aiTimeSuggestion: string | null;
   tags: string[];
@@ -75,6 +77,7 @@ export interface TaskItem {
   priority: string;
   sourceCardIds: string[];
   confidence: number;
+  checklist: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -90,6 +93,13 @@ export interface WorkspaceUiState {
   captureFeed: CaptureFeedItem[];
 }
 
+export interface AiConfig {
+  provider: AiProvider;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
 export interface CaptureFeedItem {
   id: string;
   captureId: string;
@@ -102,6 +112,7 @@ export interface WorkspaceSnapshot {
   schemaVersion: number;
   updatedAt: string;
   board: Board;
+  ai: AiConfig;
   captures: Capture[];
   sourceCards: SourceCard[];
   taskItems: TaskItem[];
@@ -130,6 +141,13 @@ export interface UpdateTaskStatusPayload {
 
 export interface UpdateLanguagePayload {
   language: AppLanguage;
+}
+
+export interface UpdateAiConfigPayload {
+  provider: AiProvider;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
 }
 
 export interface CreateManualTextCapturePayload {

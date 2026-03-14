@@ -17,12 +17,13 @@ const {
   LocalWorkspaceRepository,
 } = require("./repositories/localWorkspaceRepository.cjs");
 const { LocalAiAdapter } = require("./services/localAiAdapter.cjs");
+const { OpenAiCompatibleAdapter } = require("./services/openAiCompatibleAdapter.cjs");
 const { CapturePipeline } = require("./services/capturePipeline.cjs");
 const { getDesktopCopy, normalizeLanguage } = require("./i18n.cjs");
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
-const trayIconDataUrl =
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAMAAAAoLQ9TAAAAVFBMVEVHcEzOujvRu0DfuErz0V7DuDPopTDWrDLWrDPUujfku2LvwkXcqSzrwUDz4XLTvDTlzzPjyz3Syj7FtjHcty7WtTTVxDDOqSvQqCrRwSvNsivcvjDkzDSuQofPAAAAHHRSTlMAB3qRy6f+v8a4Iu/79hRGeRjdi0mDUGANwqMK+ds46QAAAHVJREFUGNNVzccSgCAMBNBoY0Ts+/7/00QJ2czMIHfAQQ5t96caGfXAOQgW8Twg5KJLOzFWB6C2b+DmQl3Q1nJ5VoQxk6zSQ1sRAUnRVsdr5LytM+7EV+hybMtn8gnna1uNtr9dNMaO0s9WQxh4H0DUuVwlpZoKJxe/G2MHMqEj59IAAAAASUVORK5CYII=";
+const APP_NAME = "Canvas Inbox";
+const APP_ID = "com.canvasinbox.desktop";
 
 let mainWindow = null;
 let tray = null;
@@ -31,11 +32,77 @@ let isQuitting = false;
 const repository = new LocalWorkspaceRepository(
   path.join(app.getPath("userData"), "canvas-inbox"),
 );
-const aiAdapter = new LocalAiAdapter();
-const capturePipeline = new CapturePipeline({ repository, aiAdapter });
+const localAiAdapter = new LocalAiAdapter();
+const remoteAiAdapter = new OpenAiCompatibleAdapter({
+  fallbackAdapter: localAiAdapter,
+});
+const capturePipeline = new CapturePipeline({
+  repository,
+  localAiAdapter,
+  remoteAiAdapter,
+});
 
-app.setName("Canvas Inbox");
-app.setAppUserModelId("com.canvasinbox.desktop");
+app.setName(APP_NAME);
+app.setAppUserModelId(APP_ID);
+
+const resolveAssetPath = (fileName) =>
+  path.join(__dirname, "..", isDev ? "public" : "dist", fileName);
+
+const getWindowIconPath = () =>
+  resolveAssetPath(process.platform === "win32" ? "app-icon.ico" : "app-icon.png");
+
+const loadWindowIcon = () => {
+  const image = nativeImage.createFromPath(getWindowIconPath());
+
+  if (image.isEmpty()) {
+    return null;
+  }
+
+  return image;
+};
+
+const loadTrayImage = () => {
+  const image = nativeImage.createFromPath(resolveAssetPath("app-icon.png"));
+
+  if (image.isEmpty()) {
+    return nativeImage.createEmpty();
+  }
+
+  return image.resize({
+    width: 16,
+    height: 16,
+  });
+};
+
+const buildRelaunchCommand = () => {
+  const execPath = process.execPath;
+  const appRoot = path.join(__dirname, "..");
+
+  if (app.isPackaged) {
+    return `"${execPath}"`;
+  }
+
+  return `"${execPath}" "${appRoot}"`;
+};
+
+const applyWindowsTaskbarDetails = () => {
+  if (
+    process.platform !== "win32" ||
+    !mainWindow ||
+    mainWindow.isDestroyed() ||
+    typeof mainWindow.setAppDetails !== "function"
+  ) {
+    return;
+  }
+
+  mainWindow.setAppDetails({
+    appId: APP_ID,
+    appIconPath: getWindowIconPath(),
+    appIconIndex: 0,
+    relaunchCommand: buildRelaunchCommand(),
+    relaunchDisplayName: APP_NAME,
+  });
+};
 
 const showNotification = (title, body) => {
   if (!Notification.isSupported()) {
@@ -45,18 +112,24 @@ const showNotification = (title, body) => {
   new Notification({ title, body, silent: true }).show();
 };
 
-const createTrayImage = () =>
-  nativeImage.createFromDataURL(trayIconDataUrl).resize({
-    width: 16,
-    height: 16,
-  });
-
 const broadcastSnapshot = (snapshot) => {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return;
   }
 
   mainWindow.webContents.send("workspace:updated", snapshot);
+};
+
+const getWindowState = () => ({
+  isMaximized: Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isMaximized()),
+});
+
+const broadcastWindowState = () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  mainWindow.webContents.send("window:stateChanged", getWindowState());
 };
 
 const showWindow = () => {
@@ -69,13 +142,17 @@ const showWindow = () => {
 };
 
 const createWindow = async () => {
+  const windowIcon = loadWindowIcon();
   mainWindow = new BrowserWindow({
     width: 1480,
     height: 920,
     minWidth: 1180,
     minHeight: 760,
+    frame: false,
+    titleBarStyle: "hidden",
     backgroundColor: "#f5efe2",
-    title: "Canvas Inbox",
+    title: APP_NAME,
+    icon: windowIcon || getWindowIconPath(),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -83,7 +160,21 @@ const createWindow = async () => {
     },
   });
 
+  if (windowIcon && typeof mainWindow.setIcon === "function") {
+    mainWindow.setIcon(windowIcon);
+  }
+  applyWindowsTaskbarDetails();
+
   mainWindow.removeMenu();
+  mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    console.log(`[renderer:${level}] ${sourceId}:${line} ${message}`);
+  });
+  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+    console.error(`[did-fail-load] ${errorCode} ${errorDescription} ${validatedURL}`);
+  });
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    console.error(`[render-process-gone] ${details.reason}`);
+  });
   mainWindow.on("close", (event) => {
     if (isQuitting) {
       return;
@@ -92,17 +183,27 @@ const createWindow = async () => {
     event.preventDefault();
     mainWindow.hide();
   });
+  mainWindow.on("maximize", () => {
+    broadcastWindowState();
+  });
+  mainWindow.on("unmaximize", () => {
+    broadcastWindowState();
+  });
+  mainWindow.on("show", () => {
+    broadcastWindowState();
+  });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: "deny" };
   });
-
   if (isDev) {
     await mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
     await mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
+
+  broadcastWindowState();
 };
 
 const refreshTrayMenu = () => {
@@ -140,8 +241,8 @@ const refreshTrayMenu = () => {
 };
 
 const createTray = () => {
-  tray = new Tray(createTrayImage());
-  tray.setToolTip("Canvas Inbox");
+  tray = new Tray(loadTrayImage());
+  tray.setToolTip(APP_NAME);
   tray.on("click", () => {
     if (!mainWindow || mainWindow.isDestroyed()) {
       return;
@@ -247,7 +348,26 @@ const createManualTextCapture = async ({ text, position }) => {
   }
 };
 
-const updateSourceCardText = ({ sourceCardId, text }) => {
+const analyzeCaptureWithCurrentConfig = async ({
+  rawText,
+  sourceType,
+  language,
+}) => {
+  const snapshot = repository.getSnapshot();
+  const adapter =
+    snapshot.ai?.provider === "openai-compatible"
+      ? remoteAiAdapter
+      : localAiAdapter;
+
+  return adapter.analyzeCapture({
+    rawText,
+    sourceType,
+    language,
+    config: snapshot.ai,
+  });
+};
+
+const updateSourceCardText = async ({ sourceCardId, text }) => {
   const normalizedText = typeof text === "string" ? text.trim() : "";
 
   if (!normalizedText) {
@@ -264,7 +384,7 @@ const updateSourceCardText = ({ sourceCardId, text }) => {
     return snapshot;
   }
 
-  const analysis = aiAdapter.analyzeCapture({
+  const analysis = await analyzeCaptureWithCurrentConfig({
     rawText: normalizedText,
     sourceType: capture.sourceType,
     language: snapshot.ui.language,
@@ -275,6 +395,17 @@ const updateSourceCardText = ({ sourceCardId, text }) => {
     analysis,
   });
 
+  broadcastSnapshot(nextSnapshot);
+  return nextSnapshot;
+};
+
+const updateAiConfig = ({ provider, baseUrl, apiKey, model }) => {
+  const nextSnapshot = repository.updateAiConfig({
+    provider,
+    baseUrl,
+    apiKey,
+    model,
+  });
   broadcastSnapshot(nextSnapshot);
   return nextSnapshot;
 };
@@ -329,6 +460,38 @@ const deleteSourceCard = ({ sourceCardId }) => {
   return snapshot;
 };
 
+const minimizeWindow = () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return getWindowState();
+  }
+
+  mainWindow.minimize();
+  return getWindowState();
+};
+
+const toggleMaximizeWindow = () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return getWindowState();
+  }
+
+  if (mainWindow.isMaximized()) {
+    mainWindow.unmaximize();
+  } else {
+    mainWindow.maximize();
+  }
+
+  return getWindowState();
+};
+
+const closeWindow = () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return getWindowState();
+  }
+
+  mainWindow.close();
+  return getWindowState();
+};
+
 app.on("before-quit", () => {
   isQuitting = true;
 });
@@ -345,6 +508,10 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("workspace:getSnapshot", () => repository.getSnapshot());
+  ipcMain.handle("window:getState", () => getWindowState());
+  ipcMain.handle("window:minimize", () => minimizeWindow());
+  ipcMain.handle("window:toggleMaximize", () => toggleMaximizeWindow());
+  ipcMain.handle("window:close", () => closeWindow());
 
   ipcMain.handle("workspace:captureClipboard", async () =>
     captureClipboard({
@@ -355,6 +522,10 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("workspace:createManualTextCapture", async (_event, payload) =>
     createManualTextCapture(payload),
+  );
+
+  ipcMain.handle("workspace:updateAiConfig", (_event, payload) =>
+    updateAiConfig(payload),
   );
 
   ipcMain.handle("workspace:getAttachmentDataUrl", (_event, attachmentId) =>
