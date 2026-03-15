@@ -273,6 +273,12 @@ img {
   font-weight: 700;
 }
 
+.shortcut-pill.is-error {
+  border-color: rgba(194, 58, 58, 0.28);
+  background: rgba(255, 241, 241, 0.92);
+  color: var(--danger);
+}
+
 .topbar__actions {
   display: flex;
   justify-content: flex-end;
@@ -1372,11 +1378,62 @@ img {
   gap: 8px;
 }
 
+.settings-field-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settings-field-note.is-success {
+  color: var(--success);
+}
+
 .settings-section__footer {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+}
+
+.settings-runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.runtime-status-card {
+  display: grid;
+  gap: 8px;
+  min-height: 156px;
+  padding: 16px;
+  border: 1px solid rgba(134, 150, 173, 0.22);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.84);
+  box-shadow: var(--shadow-soft);
+}
+
+.runtime-status-card strong {
+  color: var(--text-strong);
+  font-size: 18px;
+  line-height: 1.15;
+}
+
+.runtime-status-card p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.runtime-status-card.is-healthy {
+  border-color: rgba(23, 114, 77, 0.18);
+  background: linear-gradient(180deg, rgba(244, 252, 247, 0.96), rgba(236, 248, 240, 0.94));
+}
+
+.runtime-status-card.is-warning {
+  border-color: rgba(201, 106, 27, 0.18);
+  background: linear-gradient(180deg, rgba(255, 249, 239, 0.98), rgba(255, 243, 227, 0.94));
 }
 
 .settings-status {
@@ -1439,6 +1496,10 @@ img {
 }
 
 @media (max-width: 1520px) {
+  .settings-runtime-grid {
+    grid-template-columns: 1fr;
+  }
+
   .topbar {
     width: min(500px, calc(100% - 360px));
   }

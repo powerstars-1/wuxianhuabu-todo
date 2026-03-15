@@ -1,6 +1,8 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("desktopApi", {
+  getAppRuntimeState: () => ipcRenderer.invoke("app:getRuntimeState"),
+  retryShortcutRegistration: () => ipcRenderer.invoke("app:retryShortcutRegistration"),
   getWindowState: () => ipcRenderer.invoke("window:getState"),
   minimizeWindow: () => ipcRenderer.invoke("window:minimize"),
   toggleMaximizeWindow: () => ipcRenderer.invoke("window:toggleMaximize"),
@@ -39,6 +41,14 @@ contextBridge.exposeInMainWorld("desktopApi", {
 
     return () => {
       ipcRenderer.removeListener("window:stateChanged", handler);
+    };
+  },
+  onAppRuntimeUpdated: (listener) => {
+    const handler = (_event, state) => listener(state);
+    ipcRenderer.on("app:runtimeUpdated", handler);
+
+    return () => {
+      ipcRenderer.removeListener("app:runtimeUpdated", handler);
     };
   },
 });

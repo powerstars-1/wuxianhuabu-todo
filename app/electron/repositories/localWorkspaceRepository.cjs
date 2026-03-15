@@ -6,11 +6,16 @@ const {
   getDesktopCopy,
   normalizeLanguage,
 } = require("../i18n.cjs");
+const { SecureSecretsStore } = require("../services/secureSecretsStore.cjs");
 
 const SCHEMA_VERSION = 1;
 const BOARD_ID = "board_local_main";
 const DEFAULT_SHORTCUT = "CommandOrControl+Shift+V";
 const MAX_CAPTURE_FEED_ITEMS = 12;
+const WORKSPACE_FILE_NAME = "workspace.json";
+const WORKSPACE_BACKUP_FILE_NAME = "workspace.json.bak";
+const WORKSPACE_TMP_FILE_NAME = "workspace.json.tmp";
+const WORKSPACE_ROLLBACK_FILE_NAME = "workspace.json.rollback";
 
 const nowIso = () => new Date().toISOString();
 
@@ -19,8 +24,14 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
 const createDefaultAiConfig = () => ({
   provider: "local",
   baseUrl: "https://api.openai.com/v1",
-  apiKey: "",
   model: "gpt-4o-mini",
+  hasApiKey: false,
+});
+
+const createStorageHealth = () => ({
+  status: "ready",
+  message: null,
+  updatedAt: null,
 });
 
 const createId = (prefix) =>
@@ -88,14 +99,14 @@ const normalizeWorkspace = (workspace) => {
         typeof workspace.ai?.baseUrl === "string"
           ? workspace.ai.baseUrl
           : fallback.ai.baseUrl,
-      apiKey:
-        typeof workspace.ai?.apiKey === "string"
-          ? workspace.ai.apiKey
-          : fallback.ai.apiKey,
       model:
         typeof workspace.ai?.model === "string"
           ? workspace.ai.model
           : fallback.ai.model,
+      hasApiKey:
+        typeof workspace.ai?.hasApiKey === "boolean"
+          ? workspace.ai.hasApiKey
+          : typeof workspace.ai?.apiKey === "string" && Boolean(workspace.ai.apiKey.trim()),
     },
     captures: Array.isArray(workspace.captures)
       ? workspace.captures.map((capture) => ({
@@ -204,30 +215,79 @@ const createTaskItemFromSuggestion = ({ suggestion, sourceCardId, createdAt }) =
   updatedAt: createdAt,
 });
 
+const safeUnlink = (filePath) => {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return;
+  }
+
+  try {
+    fs.unlinkSync(filePath);
+  } catch (error) {
+    // Best-effort cleanup only.
+  }
+};
+
 class LocalWorkspaceRepository {
   constructor(baseDir) {
     this.baseDir = baseDir;
-    this.workspaceFilePath = path.join(baseDir, "workspace.json");
+    this.workspaceFilePath = path.join(baseDir, WORKSPACE_FILE_NAME);
+    this.workspaceBackupFilePath = path.join(baseDir, WORKSPACE_BACKUP_FILE_NAME);
+    this.workspaceTmpFilePath = path.join(baseDir, WORKSPACE_TMP_FILE_NAME);
+    this.workspaceRollbackFilePath = path.join(baseDir, WORKSPACE_ROLLBACK_FILE_NAME);
     this.attachmentsDir = path.join(baseDir, "attachments");
+    this.secretsStore = new SecureSecretsStore(baseDir);
+    this.storageHealth = createStorageHealth();
     this.ensureStorage();
   }
 
   ensureStorage() {
     fs.mkdirSync(this.baseDir, { recursive: true });
     fs.mkdirSync(this.attachmentsDir, { recursive: true });
+  }
 
-    if (!fs.existsSync(this.workspaceFilePath)) {
-      this.writeWorkspace(createEmptyWorkspace());
+  setStorageHealth(status, message) {
+    this.storageHealth = {
+      status,
+      message,
+      updatedAt: nowIso(),
+    };
+  }
+
+  getStorageHealth() {
+    return clone(this.storageHealth);
+  }
+
+  archiveWorkspaceFile(filePath, suffix) {
+    if (!filePath || !fs.existsSync(filePath)) {
+      return null;
+    }
+
+    const timestamp = nowIso().replace(/[:.]/g, "-");
+    const archivePath = `${filePath}.${suffix}.${timestamp}`;
+
+    try {
+      fs.renameSync(filePath, archivePath);
+      return archivePath;
+    } catch (error) {
+      return null;
     }
   }
 
-  readWorkspace() {
+  readWorkspaceFile(filePath) {
+    if (!fs.existsSync(filePath)) {
+      return {
+        found: false,
+        workspace: null,
+        error: null,
+      };
+    }
+
     try {
-      const raw = fs.readFileSync(this.workspaceFilePath, "utf8");
+      const raw = fs.readFileSync(filePath, "utf8");
       const parsed = JSON.parse(raw);
 
       if (!parsed?.schemaVersion) {
-        return createEmptyWorkspace();
+        throw new Error("Workspace schema version is missing.");
       }
 
       const workspace = normalizeWorkspace(parsed);
@@ -258,22 +318,151 @@ class LocalWorkspaceRepository {
         };
       });
 
-      return workspace;
+      return {
+        found: true,
+        workspace,
+        error: null,
+      };
     } catch (error) {
-      return createEmptyWorkspace();
+      return {
+        found: true,
+        workspace: null,
+        error,
+      };
+    }
+  }
+
+  readWorkspace() {
+    const primaryResult = this.readWorkspaceFile(this.workspaceFilePath);
+
+    if (primaryResult.workspace) {
+      return primaryResult.workspace;
+    }
+
+    const backupResult = this.readWorkspaceFile(this.workspaceBackupFilePath);
+
+    if (backupResult.workspace) {
+      this.archiveWorkspaceFile(this.workspaceFilePath, "corrupt");
+      this.writeWorkspace(backupResult.workspace);
+      this.setStorageHealth(
+        "recovered-from-backup",
+        getDesktopCopy(backupResult.workspace.ui.language).workspaceRecoveredFromBackup,
+      );
+      return clone(backupResult.workspace);
+    }
+
+    const shouldReset =
+      primaryResult.found ||
+      backupResult.found ||
+      fs.existsSync(this.workspaceRollbackFilePath) ||
+      fs.existsSync(this.workspaceTmpFilePath);
+
+    if (shouldReset) {
+      this.archiveWorkspaceFile(this.workspaceFilePath, "corrupt");
+      this.archiveWorkspaceFile(this.workspaceBackupFilePath, "corrupt");
+      this.archiveWorkspaceFile(this.workspaceRollbackFilePath, "stale");
+      this.archiveWorkspaceFile(this.workspaceTmpFilePath, "stale");
+
+      const emptyWorkspace = createEmptyWorkspace();
+      this.writeWorkspace(emptyWorkspace);
+      this.setStorageHealth(
+        "reset-to-empty",
+        getDesktopCopy(emptyWorkspace.ui.language).workspaceResetAfterCorruption,
+      );
+      return emptyWorkspace;
+    }
+
+    const emptyWorkspace = createEmptyWorkspace();
+    this.writeWorkspace(emptyWorkspace);
+    return emptyWorkspace;
+  }
+
+  getSnapshot() {
+    const workspace = this.readWorkspace();
+
+    return clone({
+      ...workspace,
+      ai: {
+        ...workspace.ai,
+        hasApiKey: this.secretsStore.hasAiApiKey(),
+      },
+    });
+  }
+
+  getAiRuntimeConfig() {
+    const workspace = this.readWorkspace();
+
+    return {
+      ...workspace.ai,
+      apiKey: this.secretsStore.getAiApiKey(),
+      hasApiKey: this.secretsStore.hasAiApiKey(),
+    };
+  }
+
+  migrateLegacyAiConfig() {
+    const primaryResult = this.readWorkspaceFile(this.workspaceFilePath);
+    const workspace = primaryResult.workspace || this.readWorkspace();
+    const rawFilePath = primaryResult.workspace ? this.workspaceFilePath : this.workspaceBackupFilePath;
+
+    if (!rawFilePath || !fs.existsSync(rawFilePath)) {
+      return false;
+    }
+
+    try {
+      const parsed = JSON.parse(fs.readFileSync(rawFilePath, "utf8"));
+      const legacyApiKey =
+        typeof parsed?.ai?.apiKey === "string" ? parsed.ai.apiKey.trim() : "";
+
+      if (!legacyApiKey) {
+        return false;
+      }
+
+      this.secretsStore.setAiApiKey(legacyApiKey);
+      const nextWorkspace = {
+        ...workspace,
+        ai: {
+          ...workspace.ai,
+          hasApiKey: true,
+        },
+      };
+      this.writeWorkspace(nextWorkspace);
+      return true;
+    } catch (error) {
+      return false;
     }
   }
 
   writeWorkspace(workspace) {
-    fs.writeFileSync(
-      this.workspaceFilePath,
-      JSON.stringify(workspace, null, 2),
-      "utf8",
-    );
-  }
+    this.ensureStorage();
 
-  getSnapshot() {
-    return clone(this.readWorkspace());
+    const serialized = JSON.stringify(workspace, null, 2);
+    JSON.parse(serialized);
+    fs.writeFileSync(this.workspaceTmpFilePath, serialized, "utf8");
+
+    safeUnlink(this.workspaceRollbackFilePath);
+
+    if (fs.existsSync(this.workspaceFilePath)) {
+      fs.renameSync(this.workspaceFilePath, this.workspaceRollbackFilePath);
+    }
+
+    try {
+      fs.renameSync(this.workspaceTmpFilePath, this.workspaceFilePath);
+    } catch (error) {
+      if (fs.existsSync(this.workspaceRollbackFilePath) && !fs.existsSync(this.workspaceFilePath)) {
+        fs.renameSync(this.workspaceRollbackFilePath, this.workspaceFilePath);
+      }
+      safeUnlink(this.workspaceTmpFilePath);
+      throw error;
+    }
+
+    try {
+      fs.copyFileSync(this.workspaceFilePath, this.workspaceBackupFilePath);
+    } catch (error) {
+      // The main workspace file is already committed. Backup refresh is best-effort.
+    }
+
+    safeUnlink(this.workspaceRollbackFilePath);
+    safeUnlink(this.workspaceTmpFilePath);
   }
 
   deleteAttachmentFiles(attachments) {
@@ -847,13 +1036,25 @@ class LocalWorkspaceRepository {
   updateAiConfig(config) {
     const workspace = this.readWorkspace();
     const updatedAt = nowIso();
+    const nextProvider =
+      config?.provider === "openai-compatible" ? "openai-compatible" : "local";
+    const nextBaseUrl = typeof config?.baseUrl === "string" ? config.baseUrl.trim() : "";
+    const nextModel = typeof config?.model === "string" ? config.model.trim() : "";
+    const nextApiKey = typeof config?.apiKey === "string" ? config.apiKey.trim() : "";
+    let hasApiKey = this.secretsStore.hasAiApiKey();
+
+    if (config?.clearApiKey) {
+      this.secretsStore.deleteAiApiKey();
+      hasApiKey = false;
+    } else if (nextApiKey) {
+      hasApiKey = this.secretsStore.setAiApiKey(nextApiKey);
+    }
 
     workspace.ai = {
-      provider:
-        config?.provider === "openai-compatible" ? "openai-compatible" : "local",
-      baseUrl: typeof config?.baseUrl === "string" ? config.baseUrl.trim() : "",
-      apiKey: typeof config?.apiKey === "string" ? config.apiKey.trim() : "",
-      model: typeof config?.model === "string" ? config.model.trim() : "",
+      provider: nextProvider,
+      baseUrl: nextBaseUrl,
+      model: nextModel,
+      hasApiKey,
     };
     workspace.board.updatedAt = updatedAt;
     workspace.updatedAt = updatedAt;

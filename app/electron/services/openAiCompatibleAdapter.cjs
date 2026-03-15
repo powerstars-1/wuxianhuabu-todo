@@ -75,16 +75,19 @@ const ANALYSIS_SYSTEM_PROMPT = [
   "tags 使用简短小写标签，最多 4 个。",
   "taskSuggestions 返回 1 到 3 个可执行任务。",
   "默认应该只返回 1 个主任务。",
+  "checklist 不是必填的任务分解清单，而是可选的原文子项容器。",
+  "默认返回 checklist: []。",
   "如果整段内容本质上是在交付同一个目标，默认只返回 1 个主任务。",
-  "如果原文包含编号列表、项目列表、分条说明，并且这些条目服务于同一个总目标，不要拆成多个平级任务，而是返回 1 个主任务，并把分条内容放进 checklist。",
+  "只有当原文明确包含编号列表、项目列表、勾选项，或清楚写出了多条从属子项，并且这些条目服务于同一个总目标时，才返回 1 个主任务并把原始子项放进 checklist。",
   "只有当原文清楚描述多个彼此独立、可以分别完成的事项时，才拆成多个任务。",
   "不要因为并列补充、多个指标、多个时间范围、多个数据口径、多个说明句而拆成多个任务。",
   "不要把一个请求拆成微步骤。",
   "不要把同一份交付里的数据维度、分析口径、指标项错误拆成多个平级任务。",
+  "如果原文只是普通段落、聊天消息或一句请求，不要脑补 checklist，也不要为了凑结构强行拆解子任务。",
   "对于聊天式消息，要提炼用户真正需要跟进的动作，而不是机械复述说话语气。",
   "任务 title 必须是简洁明确的动作短语。",
   "任务 summary 用一句话解释背景和目标。",
-  "checklist 最多 6 项，每项是这条主任务下的关键子项或信息项；如果没有清单项，返回空数组。",
+  "checklist 最多 6 项，每项都必须来自原文已有的子项；如果原文没有明确清单项，返回空数组。",
   "confidence 必须是 0 到 1 之间的数字。",
   "如果内容有歧义，也至少返回 1 个低置信度的复核型任务。",
   "示例：如果原文是“明天看下网易云数据需求，下面有 3 条指标项”，应返回 1 个任务，把 3 条指标项写入 checklist。",
@@ -104,7 +107,9 @@ const buildAnalysisUserPrompt = ({ rawText, sourceType, language }) =>
     "task title 要简洁、直接、可执行。",
     "大多数聊天式短消息应该只生成 1 个主任务。",
     "只有在原文明确是多个独立事项时，才返回多个任务。",
-    "如果存在编号列表且它们属于同一个交付目标，请使用 1 个主任务加 checklist 的形式表达。",
+    "如果原文没有明确的列表、编号项或勾选项，不要补写 checklist，直接返回空数组。",
+    "不要为了凑结构强行做任务分解。",
+    "如果存在明确编号列表且它们属于同一个交付目标，请使用 1 个主任务加 checklist 的形式表达。",
   ].join("\n");
 
 const buildAnalysisRequestBody = ({
@@ -112,8 +117,14 @@ const buildAnalysisRequestBody = ({
   rawText,
   sourceType,
   language,
+  imageDataUrls,
   useStructuredResponseFormat,
 }) => {
+  const userPrompt = buildAnalysisUserPrompt({
+    rawText,
+    sourceType,
+    language,
+  });
   const body = {
     model,
     temperature: 0.2,
@@ -124,11 +135,22 @@ const buildAnalysisRequestBody = ({
       },
       {
         role: "user",
-        content: buildAnalysisUserPrompt({
-          rawText,
-          sourceType,
-          language,
-        }),
+        content:
+          Array.isArray(imageDataUrls) && imageDataUrls.length > 0
+            ? [
+                {
+                  type: "text",
+                  text: userPrompt,
+                },
+                ...imageDataUrls.map((url) => ({
+                  type: "image_url",
+                  image_url: {
+                    url,
+                    detail: "low",
+                  },
+                })),
+              ]
+            : userPrompt,
       },
     ],
   };
@@ -154,6 +176,7 @@ class OpenAiCompatibleAdapter {
     rawText,
     sourceType,
     language,
+    imageDataUrls,
     copy,
   }) {
     const requestBodies = [
@@ -162,6 +185,7 @@ class OpenAiCompatibleAdapter {
         rawText,
         sourceType,
         language,
+        imageDataUrls,
         useStructuredResponseFormat: true,
       }),
       buildAnalysisRequestBody({
@@ -169,6 +193,7 @@ class OpenAiCompatibleAdapter {
         rawText,
         sourceType,
         language,
+        imageDataUrls,
         useStructuredResponseFormat: false,
       }),
     ];
@@ -185,7 +210,11 @@ class OpenAiCompatibleAdapter {
       });
 
       if (!response.ok) {
-        lastError = new Error(copy.remoteAiRequestFailed(response.status));
+        lastError = new Error(
+          Array.isArray(imageDataUrls) && imageDataUrls.length > 0
+            ? copy.remoteAiVisionRequestFailed(response.status)
+            : copy.remoteAiRequestFailed(response.status),
+        );
         continue;
       }
 
@@ -208,15 +237,16 @@ class OpenAiCompatibleAdapter {
     throw lastError || new Error(copy.remoteAiInvalidResponse);
   }
 
-  async analyzeCapture({ rawText, sourceType, language, config }) {
+  async analyzeCapture({ rawText, sourceType, language, imageDataUrls, config }) {
     const fallbackAnalysis = this.fallbackAdapter.analyzeCapture({
       rawText,
       sourceType,
       language,
     });
     const copy = getDesktopCopy(language);
+    const hasImageInputs = Array.isArray(imageDataUrls) && imageDataUrls.length > 0;
 
-    if (!rawText?.trim()) {
+    if (!rawText?.trim() && !hasImageInputs) {
       return fallbackAnalysis;
     }
 
@@ -235,6 +265,7 @@ class OpenAiCompatibleAdapter {
       rawText,
       sourceType,
       language,
+      imageDataUrls,
       copy,
     });
 

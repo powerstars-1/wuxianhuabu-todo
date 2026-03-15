@@ -4,6 +4,7 @@ export type CaptureStatus = "queued" | "processing" | "done" | "failed";
 export type CaptureFeedStage = "captured" | "projected" | "failed";
 export type AppLanguage = "zh-CN" | "en-US";
 export type AiProvider = "local" | "openai-compatible";
+export type StorageHealthStatus = "ready" | "recovered-from-backup" | "reset-to-empty";
 
 export interface Board {
   id: string;
@@ -96,8 +97,8 @@ export interface WorkspaceUiState {
 export interface AiConfig {
   provider: AiProvider;
   baseUrl: string;
-  apiKey: string;
   model: string;
+  hasApiKey: boolean;
 }
 
 export interface CaptureFeedItem {
@@ -118,6 +119,23 @@ export interface WorkspaceSnapshot {
   taskItems: TaskItem[];
   attachments: Attachment[];
   ui: WorkspaceUiState;
+}
+
+export interface ShortcutRuntimeState {
+  accelerator: string;
+  registered: boolean;
+  errorMessage: string | null;
+}
+
+export interface StorageHealthState {
+  status: StorageHealthStatus;
+  message: string | null;
+  updatedAt: string | null;
+}
+
+export interface AppRuntimeState {
+  shortcut: ShortcutRuntimeState;
+  storage: StorageHealthState;
 }
 
 export interface ScrollState {
@@ -148,6 +166,7 @@ export interface UpdateAiConfigPayload {
   baseUrl: string;
   apiKey: string;
   model: string;
+  clearApiKey?: boolean;
 }
 
 export interface CreateManualTextCapturePayload {

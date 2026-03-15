@@ -24,10 +24,17 @@ const { getDesktopCopy, normalizeLanguage } = require("./i18n.cjs");
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const APP_NAME = "Canvas Inbox";
 const APP_ID = "com.canvasinbox.desktop";
+const MAX_VISION_EDGE = 1568;
+const MAX_VISION_IMAGE_BYTES = 7 * 1024 * 1024;
 
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
+let shortcutState = {
+  accelerator: DEFAULT_SHORTCUT,
+  registered: false,
+  errorMessage: null,
+};
 
 const repository = new LocalWorkspaceRepository(
   path.join(app.getPath("userData"), "canvas-inbox"),
@@ -40,10 +47,17 @@ const capturePipeline = new CapturePipeline({
   repository,
   localAiAdapter,
   remoteAiAdapter,
+  prepareVisionAttachmentDataUrls,
 });
 
 app.setName(APP_NAME);
 app.setAppUserModelId(APP_ID);
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+}
 
 const resolveAssetPath = (fileName) =>
   path.join(__dirname, "..", isDev ? "public" : "dist", fileName);
@@ -112,6 +126,73 @@ const showNotification = (title, body) => {
   new Notification({ title, body, silent: true }).show();
 };
 
+function encodeVisionImage(image) {
+  let currentImage = image;
+  let { width, height } = currentImage.getSize();
+
+  if (Math.max(width, height) > MAX_VISION_EDGE) {
+    const scale = MAX_VISION_EDGE / Math.max(width, height);
+    width = Math.max(1, Math.round(width * scale));
+    height = Math.max(1, Math.round(height * scale));
+    currentImage = currentImage.resize({ width, height });
+  }
+
+  let pngBuffer = currentImage.toPNG();
+
+  if (pngBuffer.length <= MAX_VISION_IMAGE_BYTES) {
+    return `data:image/png;base64,${pngBuffer.toString("base64")}`;
+  }
+
+  let jpegQuality = 82;
+  let jpegBuffer = currentImage.toJPEG(jpegQuality);
+
+  while (
+    jpegBuffer.length > MAX_VISION_IMAGE_BYTES &&
+    Math.max(width, height) > 512
+  ) {
+    width = Math.max(512, Math.round(width * 0.82));
+    height = Math.max(512, Math.round(height * 0.82));
+    currentImage = currentImage.resize({ width, height });
+    jpegQuality = Math.max(60, jpegQuality - 8);
+    jpegBuffer = currentImage.toJPEG(jpegQuality);
+  }
+
+  if (jpegBuffer.length > MAX_VISION_IMAGE_BYTES) {
+    throw new Error("VISION_IMAGE_TOO_LARGE");
+  }
+
+  return `data:image/jpeg;base64,${jpegBuffer.toString("base64")}`;
+}
+
+function prepareVisionAttachmentDataUrls(attachmentIds) {
+  return (attachmentIds || [])
+    .map((attachmentId) => repository.getAttachmentDataUrl(attachmentId))
+    .filter((dataUrl) => typeof dataUrl === "string" && dataUrl.trim())
+    .map((dataUrl) => {
+      const image = nativeImage.createFromDataURL(dataUrl);
+
+      if (image.isEmpty()) {
+        return null;
+      }
+
+      return encodeVisionImage(image);
+    })
+    .filter((dataUrl) => typeof dataUrl === "string");
+}
+
+const getAppRuntimeState = () => ({
+  shortcut: { ...shortcutState },
+  storage: repository.getStorageHealth(),
+});
+
+const broadcastAppRuntimeState = () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  mainWindow.webContents.send("app:runtimeUpdated", getAppRuntimeState());
+};
+
 const broadcastSnapshot = (snapshot) => {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return;
@@ -135,6 +216,10 @@ const broadcastWindowState = () => {
 const showWindow = () => {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return;
+  }
+
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
   }
 
   mainWindow.show();
@@ -204,6 +289,7 @@ const createWindow = async () => {
   }
 
   broadcastWindowState();
+  broadcastAppRuntimeState();
 };
 
 const refreshTrayMenu = () => {
@@ -212,6 +298,28 @@ const refreshTrayMenu = () => {
   }
 
   const copy = getDesktopCopy(repository.getSnapshot().ui.language);
+  const shortcutMenuItems = shortcutState.registered
+    ? [
+        {
+          label: copy.trayShortcutHealthy(shortcutState.accelerator),
+          enabled: false,
+        },
+      ]
+    : [
+        {
+          label: copy.trayShortcutUnavailable(shortcutState.accelerator),
+          enabled: false,
+        },
+        {
+          label: copy.trayRetryShortcut,
+          click: () => {
+            retryShortcutRegistration({
+              notifyFailure: true,
+              notifySuccess: true,
+            });
+          },
+        },
+      ];
 
   const menu = Menu.buildFromTemplate([
     {
@@ -228,6 +336,8 @@ const refreshTrayMenu = () => {
       },
     },
     { type: "separator" },
+    ...shortcutMenuItems,
+    { type: "separator" },
     {
       label: copy.trayQuit,
       click: () => {
@@ -239,6 +349,51 @@ const refreshTrayMenu = () => {
 
   tray.setContextMenu(menu);
 };
+
+const registerCaptureShortcut = ({ notifyFailure, notifySuccess } = {}) => {
+  const copy = getDesktopCopy(repository.getSnapshot().ui.language);
+  let registered = false;
+
+  globalShortcut.unregister(DEFAULT_SHORTCUT);
+
+  try {
+    registered = globalShortcut.register(DEFAULT_SHORTCUT, () => {
+      void captureClipboard({
+        notifyStart: true,
+        openWindow: false,
+      });
+    });
+  } catch (error) {
+    registered = false;
+  }
+
+  shortcutState = registered
+    ? {
+        accelerator: DEFAULT_SHORTCUT,
+        registered: true,
+        errorMessage: null,
+      }
+    : {
+        accelerator: DEFAULT_SHORTCUT,
+        registered: false,
+        errorMessage: copy.shortcutRegistrationFailed(DEFAULT_SHORTCUT),
+      };
+
+  refreshTrayMenu();
+  broadcastAppRuntimeState();
+
+  if (!registered && notifyFailure) {
+    showNotification(copy.appTitle, shortcutState.errorMessage);
+  }
+
+  if (registered && notifySuccess) {
+    showNotification(copy.appTitle, copy.shortcutRegistrationRecovered(DEFAULT_SHORTCUT));
+  }
+
+  return getAppRuntimeState();
+};
+
+const retryShortcutRegistration = (options) => registerCaptureShortcut(options);
 
 const createTray = () => {
   tray = new Tray(loadTrayImage());
@@ -352,18 +507,35 @@ const analyzeCaptureWithCurrentConfig = async ({
   rawText,
   sourceType,
   language,
+  attachmentIds,
 }) => {
-  const snapshot = repository.getSnapshot();
+  const copy = getDesktopCopy(language);
+  const runtimeAiConfig = repository.getAiRuntimeConfig();
   const adapter =
-    snapshot.ai?.provider === "openai-compatible"
+    runtimeAiConfig?.provider === "openai-compatible"
       ? remoteAiAdapter
       : localAiAdapter;
+  let imageDataUrls = [];
+
+  try {
+    imageDataUrls =
+      sourceType === "image" || sourceType === "mixed"
+        ? prepareVisionAttachmentDataUrls(attachmentIds)
+        : [];
+  } catch (error) {
+    if (error instanceof Error && error.message === "VISION_IMAGE_TOO_LARGE") {
+      throw new Error(copy.visionImageTooLarge);
+    }
+
+    throw error;
+  }
 
   return adapter.analyzeCapture({
     rawText,
     sourceType,
     language,
-    config: snapshot.ai,
+    imageDataUrls,
+    config: runtimeAiConfig,
   });
 };
 
@@ -388,6 +560,7 @@ const updateSourceCardText = async ({ sourceCardId, text }) => {
     rawText: normalizedText,
     sourceType: capture.sourceType,
     language: snapshot.ui.language,
+    attachmentIds: sourceCard.attachmentIds,
   });
   const nextSnapshot = repository.updateAnalyzedSourceCard({
     sourceCardId,
@@ -399,15 +572,42 @@ const updateSourceCardText = async ({ sourceCardId, text }) => {
   return nextSnapshot;
 };
 
-const updateAiConfig = ({ provider, baseUrl, apiKey, model }) => {
-  const nextSnapshot = repository.updateAiConfig({
-    provider,
-    baseUrl,
-    apiKey,
-    model,
-  });
-  broadcastSnapshot(nextSnapshot);
-  return nextSnapshot;
+const updateAiConfig = ({ provider, baseUrl, apiKey, model, clearApiKey }) => {
+  const copy = getDesktopCopy(repository.getSnapshot().ui.language);
+  const normalizedProvider =
+    provider === "openai-compatible" ? "openai-compatible" : "local";
+  const normalizedBaseUrl = typeof baseUrl === "string" ? baseUrl.trim() : "";
+  const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
+  const normalizedModel = typeof model === "string" ? model.trim() : "";
+  const nextHasApiKey =
+    clearApiKey === true
+      ? false
+      : Boolean(normalizedApiKey) || repository.getSnapshot().ai.hasApiKey;
+
+  if (
+    normalizedProvider === "openai-compatible" &&
+    !(normalizedBaseUrl && normalizedModel && nextHasApiKey)
+  ) {
+    throw new Error(copy.aiConfigIncomplete);
+  }
+
+  try {
+    const nextSnapshot = repository.updateAiConfig({
+      provider: normalizedProvider,
+      baseUrl: normalizedBaseUrl,
+      apiKey: normalizedApiKey,
+      model: normalizedModel,
+      clearApiKey,
+    });
+    broadcastSnapshot(nextSnapshot);
+    return nextSnapshot;
+  } catch (error) {
+    if (error instanceof Error && error.message === "SAFE_STORAGE_UNAVAILABLE") {
+      throw new Error(copy.secureStorageUnavailable);
+    }
+
+    throw error;
+  }
 };
 
 const updateTaskText = ({ taskId, text }) => {
@@ -496,18 +696,31 @@ app.on("before-quit", () => {
   isQuitting = true;
 });
 
+app.on("second-instance", () => {
+  showWindow();
+});
+
 app.whenReady().then(async () => {
+  repository.migrateLegacyAiConfig();
   createTray();
   await createWindow();
-
-  globalShortcut.register(DEFAULT_SHORTCUT, () => {
-    void captureClipboard({
-      notifyStart: true,
-      openWindow: false,
-    });
+  registerCaptureShortcut({
+    notifyFailure: true,
   });
 
+  const storageHealth = repository.getStorageHealth();
+  if (storageHealth.status !== "ready" && storageHealth.message) {
+    showNotification(getDesktopCopy(repository.getSnapshot().ui.language).appTitle, storageHealth.message);
+  }
+
   ipcMain.handle("workspace:getSnapshot", () => repository.getSnapshot());
+  ipcMain.handle("app:getRuntimeState", () => getAppRuntimeState());
+  ipcMain.handle("app:retryShortcutRegistration", () =>
+    retryShortcutRegistration({
+      notifyFailure: true,
+      notifySuccess: true,
+    }),
+  );
   ipcMain.handle("window:getState", () => getWindowState());
   ipcMain.handle("window:minimize", () => minimizeWindow());
   ipcMain.handle("window:toggleMaximize", () => toggleMaximizeWindow());
@@ -534,8 +747,19 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("workspace:updateLanguage", (_event, payload) => {
     const snapshot = repository.updateLanguage(normalizeLanguage(payload.language));
+
+    if (!shortcutState.registered) {
+      shortcutState = {
+        ...shortcutState,
+        errorMessage: getDesktopCopy(snapshot.ui.language).shortcutRegistrationFailed(
+          shortcutState.accelerator,
+        ),
+      };
+    }
+
     refreshTrayMenu();
     broadcastSnapshot(snapshot);
+    broadcastAppRuntimeState();
     return snapshot;
   });
 

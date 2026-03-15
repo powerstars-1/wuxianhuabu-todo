@@ -26,6 +26,7 @@ import {
   TASK_CARD_WIDTH,
 } from "./lib/buildScene";
 import type {
+  AppRuntimeState,
   AiProvider,
   AppLanguage,
   Capture,
@@ -491,6 +492,8 @@ export default function App() {
   const [draftAiModel, setDraftAiModel] = useState("");
   const [aiSaveState, setAiSaveState] = useState<"idle" | "saving" | "saved">("idle");
   const [aiSaveError, setAiSaveError] = useState<string | null>(null);
+  const [appRuntime, setAppRuntime] = useState<AppRuntimeState | null>(null);
+  const [isRetryingShortcut, setIsRetryingShortcut] = useState(false);
   const [isInspectorOpen, setIsInspectorOpen] = useState(false);
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
   const [draftTaskTitle, setDraftTaskTitle] = useState("");
@@ -525,9 +528,10 @@ export default function App() {
     let disposed = false;
 
     const hydrate = async () => {
-      const [snapshot, windowState] = await Promise.all([
+      const [snapshot, windowState, runtimeState] = await Promise.all([
         window.desktopApi.getWorkspaceSnapshot(),
         window.desktopApi.getWindowState(),
+        window.desktopApi.getAppRuntimeState(),
       ]);
 
       if (disposed) {
@@ -537,6 +541,7 @@ export default function App() {
       startTransition(() => {
         setWorkspace(snapshot);
         setIsWindowMaximized(windowState.isMaximized);
+        setAppRuntime(runtimeState);
       });
     };
 
@@ -552,11 +557,17 @@ export default function App() {
         setIsWindowMaximized(state.isMaximized);
       });
     });
+    const unsubscribeAppRuntime = window.desktopApi.onAppRuntimeUpdated((state) => {
+      startTransition(() => {
+        setAppRuntime(state);
+      });
+    });
 
     return () => {
       disposed = true;
       unsubscribeWorkspace();
       unsubscribeWindowState();
+      unsubscribeAppRuntime();
     };
   }, []);
 
@@ -580,7 +591,7 @@ export default function App() {
 
     setDraftAiProvider(workspace.ai.provider);
     setDraftAiBaseUrl(workspace.ai.baseUrl);
-    setDraftAiApiKey(workspace.ai.apiKey);
+    setDraftAiApiKey("");
     setDraftAiModel(workspace.ai.model);
   }, [workspace?.ai]);
 
@@ -1303,9 +1314,23 @@ export default function App() {
         model: draftAiModel,
       });
       setAiSaveState("saved");
+      setDraftAiApiKey("");
     } catch (error) {
       setAiSaveState("idle");
       setAiSaveError(error instanceof Error ? error.message : t.aiConfigSaveError);
+    }
+  };
+
+  const handleShortcutRetry = async () => {
+    setIsRetryingShortcut(true);
+
+    try {
+      const nextState = await window.desktopApi.retryShortcutRegistration();
+      setAppRuntime(nextState);
+    } catch (error) {
+      // The main process already translates retry failures into runtime status.
+    } finally {
+      setIsRetryingShortcut(false);
     }
   };
 
@@ -1730,13 +1755,16 @@ export default function App() {
     t.pickTask;
   const selectedTaskChecklist = selectedTask?.checklist || [];
   const isRemoteAiSelected = draftAiProvider === "openai-compatible";
+  const hasStoredAiApiKey = Boolean(workspace?.ai.hasApiKey);
   const isAiConfigValid =
     draftAiProvider === "local" ||
     Boolean(
       draftAiBaseUrl.trim() &&
-        draftAiApiKey.trim() &&
+        (draftAiApiKey.trim() || hasStoredAiApiKey) &&
         draftAiModel.trim(),
     );
+  const shortcutRuntime = appRuntime?.shortcut || null;
+  const storageRuntime = appRuntime?.storage || null;
   const detailCaptureStatus = inspectedCapture?.aiStatus || null;
   const hasInspectorContent = Boolean(selectedTask || inspectedCapture);
   const inspectorSummary =
@@ -1838,8 +1866,13 @@ export default function App() {
               <p className="eyebrow">{t.productEyebrow}</p>
               <div className="topbar__title-row">
                 <h1>{workspace?.board.name || t.appTitle}</h1>
-                <div className="shortcut-pill">
-                  {workspace?.ui.shortcut || "Ctrl+Shift+V"}
+                <div
+                  className={`shortcut-pill${
+                    shortcutRuntime && !shortcutRuntime.registered ? " is-error" : ""
+                  }`}
+                  title={shortcutRuntime?.errorMessage || workspace?.ui.shortcut || "Ctrl+Shift+V"}
+                >
+                  {shortcutRuntime?.accelerator || workspace?.ui.shortcut || "Ctrl+Shift+V"}
                 </div>
               </div>
             </div>
@@ -2297,6 +2330,66 @@ export default function App() {
             </div>
 
             <div className="settings-section">
+              <div className="settings-section__heading">
+                <span className="detail-label">{t.appStatusSection}</span>
+                <p className="settings-section__hint">{t.appStatusDescription}</p>
+              </div>
+
+              <div className="settings-runtime-grid">
+                <section
+                  className={`runtime-status-card${
+                    shortcutRuntime
+                      ? shortcutRuntime.registered
+                        ? " is-healthy"
+                        : " is-warning"
+                      : ""
+                  }`}
+                >
+                  <span className="detail-label">{t.shortcutStatus}</span>
+                  <strong>{shortcutRuntime?.accelerator || workspace?.ui.shortcut || "Ctrl+Shift+V"}</strong>
+                  <p>
+                    {!shortcutRuntime
+                      ? t.loadingWorkspace
+                      : shortcutRuntime.registered
+                      ? t.shortcutStatusReady
+                      : shortcutRuntime?.errorMessage || t.shortcutStatusUnavailable}
+                  </p>
+                  {shortcutRuntime && !shortcutRuntime.registered ? (
+                    <button
+                      className="secondary-button secondary-button--compact"
+                      onClick={() => void handleShortcutRetry()}
+                      disabled={isRetryingShortcut}
+                    >
+                      {isRetryingShortcut ? t.shortcutRetrying : t.shortcutRetry}
+                    </button>
+                  ) : null}
+                </section>
+
+                <section
+                  className={`runtime-status-card${
+                    storageRuntime
+                      ? storageRuntime.status === "ready"
+                        ? " is-healthy"
+                        : " is-warning"
+                      : ""
+                  }`}
+                >
+                  <span className="detail-label">{t.storageStatus}</span>
+                  <strong>
+                    {!storageRuntime
+                      ? t.loadingWorkspace
+                      : storageRuntime.status === "recovered-from-backup"
+                      ? t.storageStatusRecovered
+                      : storageRuntime.status === "reset-to-empty"
+                        ? t.storageStatusReset
+                        : t.storageStatusReady}
+                  </strong>
+                  <p>{storageRuntime?.message || t.storageStatusHealthyHint}</p>
+                </section>
+              </div>
+            </div>
+
+            <div className="settings-section">
               <span className="detail-label">{t.languageSection}</span>
               <div className="language-options">
                 {LANGUAGE_OPTIONS.map((option) => {
@@ -2409,14 +2502,30 @@ export default function App() {
                     className="detail-input"
                     type="password"
                     value={draftAiApiKey}
+                    autoComplete="new-password"
                     onChange={(event) => {
                       setDraftAiApiKey(event.target.value);
                       setAiSaveState("idle");
                       setAiSaveError(null);
                     }}
-                    placeholder={t.aiApiKeyPlaceholder}
+                    placeholder={
+                      hasStoredAiApiKey && !draftAiApiKey.trim()
+                        ? t.aiApiKeyPlaceholderSaved
+                        : t.aiApiKeyPlaceholder
+                    }
                     disabled={!isRemoteAiSelected}
                   />
+                  {isRemoteAiSelected || hasStoredAiApiKey || draftAiApiKey.trim() ? (
+                    <p
+                      className={`settings-field-note${
+                        hasStoredAiApiKey && !draftAiApiKey.trim() ? " is-success" : ""
+                      }`}
+                    >
+                      {hasStoredAiApiKey && !draftAiApiKey.trim()
+                        ? t.aiApiKeyStored
+                        : t.aiApiKeyMissing}
+                    </p>
+                  ) : null}
                 </div>
               </div>
 

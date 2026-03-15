@@ -32,11 +32,30 @@ const getDesktopCopy = (language) => {
       capturedForLaterReview: "Captured for later review.",
       aiConfigIncomplete:
         "AI configuration is incomplete. Please provide base URL, API key, and model.",
+      secureStorageUnavailable:
+        "Secure credential storage is unavailable on this device. The API key was not saved.",
       remoteAiInvalidResponse: "The AI response could not be parsed.",
       remoteAiRequestFailed: (status) =>
         status ? `The AI service request failed (${status}).` : "The AI service request failed.",
+      remoteAiVisionRequestFailed: (status) =>
+        status
+          ? `The AI service could not analyze the image input (${status}).`
+          : "The AI service could not analyze the image input.",
+      visionImageTooLarge:
+        "The captured image is too large for the configured AI endpoint after compression.",
       sourceLinkedToast: (count) =>
         `Linked to ${count} source card${count > 1 ? "s" : ""}.`,
+      workspaceRecoveredFromBackup:
+        "The main workspace file was damaged. The app restored your last valid backup.",
+      workspaceResetAfterCorruption:
+        "The workspace files were damaged and could not be restored. The app started with a clean workspace.",
+      shortcutRegistrationFailed: (shortcut) =>
+        `The global shortcut ${shortcut} is unavailable. Another app may already be using it.`,
+      shortcutRegistrationRecovered: (shortcut) =>
+        `The global shortcut ${shortcut} is working again.`,
+      trayShortcutHealthy: (shortcut) => `Shortcut ready: ${shortcut}`,
+      trayShortcutUnavailable: (shortcut) => `Shortcut unavailable: ${shortcut}`,
+      trayRetryShortcut: "Retry shortcut registration",
       appTitle: "Canvas Inbox",
     };
   }
@@ -63,10 +82,22 @@ const getDesktopCopy = (language) => {
     imageCaptureStored: "图片已收纳到画布。",
     capturedForLaterReview: "已收纳，稍后再处理。",
     aiConfigIncomplete: "AI 配置还不完整，请填写 Base URL、API Key 和模型。",
+    secureStorageUnavailable: "当前设备无法安全保存凭据，这次没有保存 API Key。",
     remoteAiInvalidResponse: "AI 返回结果无法解析。",
     remoteAiRequestFailed: (status) =>
       status ? `AI 服务请求失败（${status}）。` : "AI 服务请求失败。",
+    remoteAiVisionRequestFailed: (status) =>
+      status ? `AI 服务暂时无法分析图片输入（${status}）。` : "AI 服务暂时无法分析图片输入。",
+    visionImageTooLarge: "压缩后图片仍然过大，当前 AI 接口暂时无法分析这张图片。",
     sourceLinkedToast: (count) => `已关联 ${count} 个来源卡片。`,
+    workspaceRecoveredFromBackup: "主工作区文件已损坏，系统已从最近一次有效备份恢复。",
+    workspaceResetAfterCorruption: "工作区文件已损坏且无法恢复，系统已重新初始化一个空工作区。",
+    shortcutRegistrationFailed: (shortcut) =>
+      `全局快捷键 ${shortcut} 当前不可用，可能已被其他应用占用。`,
+    shortcutRegistrationRecovered: (shortcut) => `全局快捷键 ${shortcut} 已恢复可用。`,
+    trayShortcutHealthy: (shortcut) => `快捷键可用：${shortcut}`,
+    trayShortcutUnavailable: (shortcut) => `快捷键不可用：${shortcut}`,
+    trayRetryShortcut: "重试注册快捷键",
     appTitle: "Canvas Inbox",
   };
 };

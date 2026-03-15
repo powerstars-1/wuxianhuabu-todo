@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 import type {
+  AppRuntimeState,
   DeleteSourceCardPayload,
   DeleteTaskPayload,
   CreateManualTextCapturePayload,
@@ -17,6 +18,8 @@ import type {
 declare global {
   interface Window {
     desktopApi: {
+      getAppRuntimeState: () => Promise<AppRuntimeState>;
+      retryShortcutRegistration: () => Promise<AppRuntimeState>;
       getWindowState: () => Promise<{
         isMaximized: boolean;
       }>;
@@ -63,6 +66,9 @@ declare global {
       ) => () => void;
       onWindowStateChanged: (
         listener: (state: { isMaximized: boolean }) => void,
+      ) => () => void;
+      onAppRuntimeUpdated: (
+        listener: (state: AppRuntimeState) => void,
       ) => () => void;
     };
   }

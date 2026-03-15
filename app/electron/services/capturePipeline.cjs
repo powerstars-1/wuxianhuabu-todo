@@ -6,10 +6,16 @@ const {
 const { getDesktopCopy } = require("../i18n.cjs");
 
 class CapturePipeline {
-  constructor({ repository, localAiAdapter, remoteAiAdapter }) {
+  constructor({
+    repository,
+    localAiAdapter,
+    remoteAiAdapter,
+    prepareVisionAttachmentDataUrls,
+  }) {
     this.repository = repository;
     this.localAiAdapter = localAiAdapter;
     this.remoteAiAdapter = remoteAiAdapter;
+    this.prepareVisionAttachmentDataUrls = prepareVisionAttachmentDataUrls;
   }
 
   enqueueClipboardPayload(payload) {
@@ -102,6 +108,7 @@ class CapturePipeline {
         sourceType,
         rawText: payload.text || "",
         language,
+        attachmentIds: attachments.map((item) => item.id),
       },
     };
   }
@@ -112,12 +119,16 @@ class CapturePipeline {
     sourceType,
     rawText,
     language,
+    attachmentIds,
   }) {
     // Small delay makes the staged pipeline visible and mirrors future async AI/OCR work.
     await new Promise((resolve) => setTimeout(resolve, 280));
-    const workspaceSnapshot = this.repository.getSnapshot();
-    const aiConfig = workspaceSnapshot.ai;
+    const aiConfig = this.repository.getAiRuntimeConfig();
     const copy = getDesktopCopy(language);
+    const imageDataUrls =
+      sourceType === "image" || sourceType === "mixed"
+        ? this.prepareVisionAttachmentDataUrls(attachmentIds)
+        : [];
 
     const adapter =
       aiConfig?.provider === "openai-compatible"
@@ -127,6 +138,7 @@ class CapturePipeline {
       rawText,
       sourceType,
       language,
+      imageDataUrls,
       config: aiConfig,
     });
     const createdAt = new Date().toISOString();
