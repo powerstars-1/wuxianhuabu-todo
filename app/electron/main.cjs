@@ -20,6 +20,7 @@ const { LocalAiAdapter } = require("./services/localAiAdapter.cjs");
 const { OpenAiCompatibleAdapter } = require("./services/openAiCompatibleAdapter.cjs");
 const { CapturePipeline } = require("./services/capturePipeline.cjs");
 const { getDesktopCopy, normalizeLanguage } = require("./i18n.cjs");
+const { formatAcceleratorForDisplay } = require("./shortcutDisplay.cjs");
 const { getWindowChromeConfig } = require("./windowChrome.cjs");
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
@@ -29,12 +30,15 @@ const MAX_VISION_EDGE = 1568;
 const MAX_VISION_IMAGE_BYTES = 7 * 1024 * 1024;
 const windowChromeConfig = getWindowChromeConfig();
 const desktopPlatform = windowChromeConfig.desktopPlatform;
+const formatShortcutLabel = (accelerator) =>
+  formatAcceleratorForDisplay(accelerator, process.platform);
 
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 let shortcutState = {
   accelerator: DEFAULT_SHORTCUT,
+  displayAccelerator: formatShortcutLabel(DEFAULT_SHORTCUT),
   registered: false,
   errorMessage: null,
 };
@@ -276,6 +280,9 @@ const createWindow = async () => {
     event.preventDefault();
     mainWindow.hide();
   });
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
   mainWindow.on("maximize", () => {
     broadcastWindowState();
   });
@@ -306,16 +313,18 @@ const refreshTrayMenu = () => {
   }
 
   const copy = getDesktopCopy(repository.getSnapshot().ui.language);
+  const shortcutLabel =
+    shortcutState.displayAccelerator || formatShortcutLabel(shortcutState.accelerator);
   const shortcutMenuItems = shortcutState.registered
     ? [
         {
-          label: copy.trayShortcutHealthy(shortcutState.accelerator),
+          label: copy.trayShortcutHealthy(shortcutLabel),
           enabled: false,
         },
       ]
     : [
         {
-          label: copy.trayShortcutUnavailable(shortcutState.accelerator),
+          label: copy.trayShortcutUnavailable(shortcutLabel),
           enabled: false,
         },
         {
@@ -361,6 +370,7 @@ const refreshTrayMenu = () => {
 const registerCaptureShortcut = ({ notifyFailure, notifySuccess } = {}) => {
   const copy = getDesktopCopy(repository.getSnapshot().ui.language);
   let registered = false;
+  const displayAccelerator = formatShortcutLabel(DEFAULT_SHORTCUT);
 
   globalShortcut.unregister(DEFAULT_SHORTCUT);
 
@@ -378,13 +388,15 @@ const registerCaptureShortcut = ({ notifyFailure, notifySuccess } = {}) => {
   shortcutState = registered
     ? {
         accelerator: DEFAULT_SHORTCUT,
+        displayAccelerator,
         registered: true,
         errorMessage: null,
       }
     : {
         accelerator: DEFAULT_SHORTCUT,
+        displayAccelerator,
         registered: false,
-        errorMessage: copy.shortcutRegistrationFailed(DEFAULT_SHORTCUT),
+        errorMessage: copy.shortcutRegistrationFailed(displayAccelerator),
       };
 
   refreshTrayMenu();
@@ -395,7 +407,7 @@ const registerCaptureShortcut = ({ notifyFailure, notifySuccess } = {}) => {
   }
 
   if (registered && notifySuccess) {
-    showNotification(copy.appTitle, copy.shortcutRegistrationRecovered(DEFAULT_SHORTCUT));
+    showNotification(copy.appTitle, copy.shortcutRegistrationRecovered(displayAccelerator));
   }
 
   return getAppRuntimeState();
@@ -760,7 +772,7 @@ app.whenReady().then(async () => {
       shortcutState = {
         ...shortcutState,
         errorMessage: getDesktopCopy(snapshot.ui.language).shortcutRegistrationFailed(
-          shortcutState.accelerator,
+          shortcutState.displayAccelerator,
         ),
       };
     }
@@ -806,8 +818,23 @@ app.whenReady().then(async () => {
   );
 
   app.on("activate", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      void createWindow();
+      return;
+    }
+
     showWindow();
   });
+});
+
+app.on("window-all-closed", () => {
+  if (mainWindow && mainWindow.isDestroyed()) {
+    mainWindow = null;
+  }
+
+  if (desktopPlatform !== "mac") {
+    app.quit();
+  }
 });
 
 app.on("will-quit", () => {

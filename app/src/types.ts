@@ -124,6 +124,7 @@ export interface WorkspaceSnapshot {
 
 export interface ShortcutRuntimeState {
   accelerator: string;
+  displayAccelerator: string;
   registered: boolean;
   errorMessage: string | null;
 }

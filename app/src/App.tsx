@@ -25,6 +25,7 @@ import {
   TASK_CARD_HEIGHT,
   TASK_CARD_WIDTH,
 } from "./lib/buildScene";
+import { formatAcceleratorForDisplay } from "./lib/shortcutDisplay";
 import type {
   AppRuntimeState,
   AiProvider,
@@ -1788,6 +1789,13 @@ export default function App() {
   const storageRuntime = appRuntime?.storage || null;
   const desktopPlatform = appRuntime?.platform || INITIAL_DESKTOP_PLATFORM;
   const showCustomWindowControls = desktopPlatform !== "mac";
+  const shortcutLabel =
+    shortcutRuntime?.displayAccelerator ||
+    formatAcceleratorForDisplay(
+      workspace?.ui.shortcut || "CommandOrControl+Shift+V",
+      desktopPlatform,
+    ) ||
+    (desktopPlatform === "mac" ? "Cmd+Shift+V" : "Ctrl+Shift+V");
   const detailCaptureStatus = inspectedCapture?.aiStatus || null;
   const hasInspectorContent = Boolean(selectedTask || inspectedCapture);
   const inspectorSummary =
@@ -1897,9 +1905,9 @@ export default function App() {
                   className={`shortcut-pill${
                     shortcutRuntime && !shortcutRuntime.registered ? " is-error" : ""
                   }`}
-                  title={shortcutRuntime?.errorMessage || workspace?.ui.shortcut || "Ctrl+Shift+V"}
+                  title={shortcutRuntime?.errorMessage || shortcutLabel}
                 >
-                  {shortcutRuntime?.accelerator || workspace?.ui.shortcut || "Ctrl+Shift+V"}
+                  {shortcutLabel}
                 </div>
               </div>
             </div>
@@ -2373,7 +2381,7 @@ export default function App() {
                   }`}
                 >
                   <span className="detail-label">{t.shortcutStatus}</span>
-                  <strong>{shortcutRuntime?.accelerator || workspace?.ui.shortcut || "Ctrl+Shift+V"}</strong>
+                  <strong>{shortcutLabel}</strong>
                   <p>
                     {!shortcutRuntime
                       ? t.loadingWorkspace
