@@ -226,6 +226,7 @@ const broadcastWindowState = () => {
 
 const showWindow = () => {
   if (!mainWindow || mainWindow.isDestroyed()) {
+    void createWindow();
     return;
   }
 
@@ -420,6 +421,7 @@ const createTray = () => {
   tray.setToolTip(APP_NAME);
   tray.on("click", () => {
     if (!mainWindow || mainWindow.isDestroyed()) {
+      void createWindow();
       return;
     }
 
