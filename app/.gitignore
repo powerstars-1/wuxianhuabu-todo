@@ -2,3 +2,4 @@ node_modules/
 dist/
 electron-builder/
 *.log
+.tmp-scene/

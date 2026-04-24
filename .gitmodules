@@ -1,0 +1,4 @@
+[submodule "upstream/excalidraw"]
+	path = upstream/excalidraw
+	url = https://github.com/excalidraw/excalidraw.git
+

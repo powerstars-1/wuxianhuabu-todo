@@ -58,6 +58,9 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Canvas Inbox",
       "artifactName": "${productName}-Setup-${version}.${ext}"
     }
   }
