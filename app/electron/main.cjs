@@ -20,12 +20,15 @@ const { LocalAiAdapter } = require("./services/localAiAdapter.cjs");
 const { OpenAiCompatibleAdapter } = require("./services/openAiCompatibleAdapter.cjs");
 const { CapturePipeline } = require("./services/capturePipeline.cjs");
 const { getDesktopCopy, normalizeLanguage } = require("./i18n.cjs");
+const { getWindowChromeConfig } = require("./windowChrome.cjs");
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const APP_NAME = "Canvas Inbox";
 const APP_ID = "com.canvasinbox.desktop";
 const MAX_VISION_EDGE = 1568;
 const MAX_VISION_IMAGE_BYTES = 7 * 1024 * 1024;
+const windowChromeConfig = getWindowChromeConfig();
+const desktopPlatform = windowChromeConfig.desktopPlatform;
 
 let mainWindow = null;
 let tray = null;
@@ -51,7 +54,10 @@ const capturePipeline = new CapturePipeline({
 });
 
 app.setName(APP_NAME);
-app.setAppUserModelId(APP_ID);
+
+if (desktopPlatform === "windows") {
+  app.setAppUserModelId(APP_ID);
+}
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
@@ -63,7 +69,7 @@ const resolveAssetPath = (fileName) =>
   path.join(__dirname, "..", isDev ? "public" : "dist", fileName);
 
 const getWindowIconPath = () =>
-  resolveAssetPath(process.platform === "win32" ? "app-icon.ico" : "app-icon.png");
+  resolveAssetPath(desktopPlatform === "windows" ? "app-icon.ico" : "app-icon.png");
 
 const loadWindowIcon = () => {
   const image = nativeImage.createFromPath(getWindowIconPath());
@@ -101,7 +107,7 @@ const buildRelaunchCommand = () => {
 
 const applyWindowsTaskbarDetails = () => {
   if (
-    process.platform !== "win32" ||
+    desktopPlatform !== "windows" ||
     !mainWindow ||
     mainWindow.isDestroyed() ||
     typeof mainWindow.setAppDetails !== "function"
@@ -181,6 +187,7 @@ function prepareVisionAttachmentDataUrls(attachmentIds) {
 }
 
 const getAppRuntimeState = () => ({
+  platform: desktopPlatform,
   shortcut: { ...shortcutState },
   storage: repository.getStorageHealth(),
 });
@@ -233,8 +240,7 @@ const createWindow = async () => {
     height: 920,
     minWidth: 1180,
     minHeight: 760,
-    frame: false,
-    titleBarStyle: "hidden",
+    ...windowChromeConfig.browserWindow,
     backgroundColor: "#f5efe2",
     title: APP_NAME,
     icon: windowIcon || getWindowIconPath(),
@@ -250,7 +256,9 @@ const createWindow = async () => {
   }
   applyWindowsTaskbarDetails();
 
-  mainWindow.removeMenu();
+  if (windowChromeConfig.shouldRemoveMenu) {
+    mainWindow.removeMenu();
+  }
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
     console.log(`[renderer:${level}] ${sourceId}:${line} ${message}`);
   });

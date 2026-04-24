@@ -31,12 +31,33 @@ import type {
   AppLanguage,
   Capture,
   CaptureStatus,
+  DesktopPlatform,
   ScrollState,
   SourceCard,
   TaskItem,
   TaskStatus,
   WorkspaceSnapshot,
 } from "./types";
+
+const inferDesktopPlatformFromNavigator = (): DesktopPlatform => {
+  if (typeof navigator === "undefined") {
+    return "linux";
+  }
+
+  const platformInfo = `${navigator.platform} ${navigator.userAgent}`;
+
+  if (/mac/i.test(platformInfo)) {
+    return "mac";
+  }
+
+  if (/win/i.test(platformInfo)) {
+    return "windows";
+  }
+
+  return "linux";
+};
+
+const INITIAL_DESKTOP_PLATFORM = inferDesktopPlatformFromNavigator();
 
 type SceneElementLike = {
   id: string;
@@ -1765,6 +1786,8 @@ export default function App() {
     );
   const shortcutRuntime = appRuntime?.shortcut || null;
   const storageRuntime = appRuntime?.storage || null;
+  const desktopPlatform = appRuntime?.platform || INITIAL_DESKTOP_PLATFORM;
+  const showCustomWindowControls = desktopPlatform !== "mac";
   const detailCaptureStatus = inspectedCapture?.aiStatus || null;
   const hasInspectorContent = Boolean(selectedTask || inspectedCapture);
   const inspectorSummary =
@@ -1824,42 +1847,46 @@ export default function App() {
   void viewportTick;
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell app-shell--${desktopPlatform}`}>
       <div
         className={`workspace-body${isInspectorOpen && hasInspectorContent ? " has-inspector" : ""}`}
         ref={workspaceRef}
       >
-        <div className="window-drag-strip" aria-hidden="true" />
+        {showCustomWindowControls ? (
+          <div className="window-drag-strip" aria-hidden="true" />
+        ) : null}
         <div className="workspace-backdrop" aria-hidden="true" />
-        <div className="window-controls" aria-label="Window controls">
-          <button
-            type="button"
-            className="window-control window-control--minimize"
-            onClick={() => void handleWindowMinimize()}
-            aria-label={t.minimizeWindow}
-            title={t.minimizeWindow}
-          >
-            <MinimizeIcon />
-          </button>
-          <button
-            type="button"
-            className="window-control window-control--maximize"
-            onClick={() => void handleWindowMaximizeToggle()}
-            aria-label={isWindowMaximized ? t.restoreWindow : t.maximizeWindow}
-            title={isWindowMaximized ? t.restoreWindow : t.maximizeWindow}
-          >
-            {isWindowMaximized ? <RestoreIcon /> : <MaximizeIcon />}
-          </button>
-          <button
-            type="button"
-            className="window-control window-control--close"
-            onClick={() => void handleWindowClose()}
-            aria-label={t.closeWindow}
-            title={t.closeWindow}
-          >
-            <CloseIcon />
-          </button>
-        </div>
+        {showCustomWindowControls ? (
+          <div className="window-controls" aria-label="Window controls">
+            <button
+              type="button"
+              className="window-control window-control--minimize"
+              onClick={() => void handleWindowMinimize()}
+              aria-label={t.minimizeWindow}
+              title={t.minimizeWindow}
+            >
+              <MinimizeIcon />
+            </button>
+            <button
+              type="button"
+              className="window-control window-control--maximize"
+              onClick={() => void handleWindowMaximizeToggle()}
+              aria-label={isWindowMaximized ? t.restoreWindow : t.maximizeWindow}
+              title={isWindowMaximized ? t.restoreWindow : t.maximizeWindow}
+            >
+              {isWindowMaximized ? <RestoreIcon /> : <MaximizeIcon />}
+            </button>
+            <button
+              type="button"
+              className="window-control window-control--close"
+              onClick={() => void handleWindowClose()}
+              aria-label={t.closeWindow}
+              title={t.closeWindow}
+            >
+              <CloseIcon />
+            </button>
+          </div>
+        ) : null}
         <header className="topbar">
           <div className="topbar__header">
             <div className="topbar__brand">

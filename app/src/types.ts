@@ -5,6 +5,7 @@ export type CaptureFeedStage = "captured" | "projected" | "failed";
 export type AppLanguage = "zh-CN" | "en-US";
 export type AiProvider = "local" | "openai-compatible";
 export type StorageHealthStatus = "ready" | "recovered-from-backup" | "reset-to-empty";
+export type DesktopPlatform = "mac" | "windows" | "linux";
 
 export interface Board {
   id: string;
@@ -134,6 +135,7 @@ export interface StorageHealthState {
 }
 
 export interface AppRuntimeState {
+  platform: DesktopPlatform;
   shortcut: ShortcutRuntimeState;
   storage: StorageHealthState;
 }

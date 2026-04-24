@@ -189,6 +189,10 @@ img {
   backdrop-filter: blur(24px);
 }
 
+.app-shell--mac .topbar {
+  top: 18px;
+}
+
 .topbar__header {
   display: flex;
   justify-content: space-between;
@@ -617,6 +621,11 @@ img {
   background: linear-gradient(180deg, rgba(246, 249, 252, 0.96), rgba(235, 240, 246, 0.94));
   box-shadow: var(--shadow-strong);
   backdrop-filter: blur(28px);
+}
+
+.app-shell--mac .task-pane,
+.app-shell--mac .inspector-drawer {
+  top: 30px;
 }
 
 .task-pane__header {
