@@ -4,6 +4,7 @@ export type CaptureStatus = "queued" | "processing" | "done" | "failed";
 export type CaptureFeedStage = "captured" | "projected" | "failed";
 export type AppLanguage = "zh-CN" | "en-US";
 export type AiProvider = "local" | "openai-compatible";
+export type SourceReviewStatus = "inbox" | "accepted" | "archived";
 export type StorageHealthStatus = "ready" | "recovered-from-backup" | "reset-to-empty";
 export type DesktopPlatform = "mac" | "windows" | "linux";
 
@@ -61,6 +62,7 @@ export interface SourceCard {
     x: number;
     y: number;
   };
+  reviewStatus: SourceReviewStatus;
   sourceType: SourceType;
   attachmentIds: string[];
   linkedTaskIds: string[];
@@ -183,6 +185,21 @@ export interface CreateManualTextCapturePayload {
 export interface UpdateSourceCardTextPayload {
   sourceCardId: string;
   text: string;
+}
+
+export interface UpdateSourceCardDetailsPayload {
+  sourceCardId: string;
+  title: string;
+  summary: string;
+}
+
+export interface ReanalyzeSourceCardPayload {
+  sourceCardId: string;
+}
+
+export interface UpdateSourceCardReviewStatusPayload {
+  sourceCardId: string;
+  reviewStatus: SourceReviewStatus;
 }
 
 export interface UpdateTaskTextPayload {

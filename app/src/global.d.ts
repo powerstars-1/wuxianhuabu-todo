@@ -5,9 +5,12 @@ import type {
   DeleteSourceCardPayload,
   DeleteTaskPayload,
   CreateManualTextCapturePayload,
+  ReanalyzeSourceCardPayload,
   UpdateAiConfigPayload,
   UpdateLanguagePayload,
+  UpdateSourceCardDetailsPayload,
   UpdateSourceCardPositionPayload,
+  UpdateSourceCardReviewStatusPayload,
   UpdateSourceCardTextPayload,
   UpdateTaskSummaryPayload,
   UpdateTaskStatusPayload,
@@ -44,6 +47,15 @@ declare global {
       updateLanguage: (payload: UpdateLanguagePayload) => Promise<WorkspaceSnapshot>;
       updateSourceCardText: (
         payload: UpdateSourceCardTextPayload,
+      ) => Promise<WorkspaceSnapshot>;
+      updateSourceCardDetails: (
+        payload: UpdateSourceCardDetailsPayload,
+      ) => Promise<WorkspaceSnapshot>;
+      reanalyzeSourceCard: (
+        payload: ReanalyzeSourceCardPayload,
+      ) => Promise<WorkspaceSnapshot>;
+      updateSourceCardReviewStatus: (
+        payload: UpdateSourceCardReviewStatusPayload,
       ) => Promise<WorkspaceSnapshot>;
       updateSourceCardPosition: (
         payload: UpdateSourceCardPositionPayload,

@@ -35,6 +35,27 @@ class CapturePipeline {
 
   enqueuePayload(payload) {
     const hasText = Boolean(payload.text && payload.text.trim().length > 0);
+
+    if (hasText && !payload.imagePngBuffer) {
+      const snapshot = this.repository.getSnapshot();
+      const copy = getDesktopCopy(snapshot.ui.language);
+      const reusableCapture = this.repository.findReusableTextCapture(payload.text);
+
+      if (reusableCapture) {
+        const reusedSnapshot = this.repository.reuseCapture(
+          reusableCapture.captureId,
+          copy.duplicateCaptureReused,
+        );
+
+        return {
+          initialSnapshot: reusedSnapshot,
+          pendingCapture: null,
+          duplicateCaptureId: reusableCapture.captureId,
+          duplicateSourceCardId: reusableCapture.sourceCardId,
+        };
+      }
+    }
+
     const attachments = [];
 
     if (payload.imagePngBuffer) {
@@ -86,6 +107,7 @@ class CapturePipeline {
       summary: copy.analyzingCardSummary,
       tags: [],
       position,
+      reviewStatus: "inbox",
       sourceType,
       attachmentIds: attachments.map((item) => item.id),
       linkedTaskIds: [],

@@ -25,6 +25,14 @@ import {
   TASK_CARD_HEIGHT,
   TASK_CARD_WIDTH,
 } from "./lib/buildScene";
+import { buildCaptureEventKey } from "./lib/captureFocus";
+import { groupManualTextCaptureCandidates } from "./lib/manualTextCaptureGrouping";
+import {
+  pruneRecentlyDeletedSources,
+  rememberRecentlyDeletedSource,
+  shouldSuppressRecentlyDeletedSourceText,
+  type RecentlyDeletedSourceEntry,
+} from "./lib/recentlyDeletedSourceSuppression";
 import { formatAcceleratorForDisplay } from "./lib/shortcutDisplay";
 import type {
   AppRuntimeState,
@@ -146,25 +154,22 @@ const getPrimaryCapture = (
   );
 };
 
-const getCanvasSourceCards = (workspace: WorkspaceSnapshot) =>
-  workspace.sourceCards.map((sourceCard) => {
-    if (sourceCard.linkedTaskIds.length !== 1) {
-      return sourceCard;
-    }
+const getCanvasSourceCards = (workspace: WorkspaceSnapshot) => workspace.sourceCards;
 
-    const linkedTask =
-      workspace.taskItems.find((taskItem) => taskItem.id === sourceCard.linkedTaskIds[0]) ||
-      null;
+const getVisibleSourceCards = (workspace: WorkspaceSnapshot) =>
+  workspace.sourceCards.filter((sourceCard) => sourceCard.reviewStatus !== "archived");
 
-    if (!linkedTask || linkedTask.title === sourceCard.title) {
-      return sourceCard;
-    }
+const getVisibleTaskItems = (workspace: WorkspaceSnapshot) => {
+  const acceptedSourceCardIds = new Set(
+    workspace.sourceCards
+      .filter((sourceCard) => sourceCard.reviewStatus === "accepted")
+      .map((sourceCard) => sourceCard.id),
+  );
 
-    return {
-      ...sourceCard,
-      title: linkedTask.title,
-    };
-  });
+  return workspace.taskItems.filter((taskItem) =>
+    taskItem.sourceCardIds.some((sourceCardId) => acceptedSourceCardIds.has(sourceCardId)),
+  );
+};
 
 const getSelectedSourceCardIdFromSelection = (
   workspace: WorkspaceSnapshot,
@@ -250,6 +255,7 @@ const getStatusTone = (status: string) => {
 const isStandaloneTextElement = (
   workspace: WorkspaceSnapshot,
   element: SceneElementLike,
+  recentlyDeletedSourceEntries: RecentlyDeletedSourceEntry[] = [],
 ) => {
   if (element.type !== "text" || element.isDeleted) {
     return false;
@@ -268,6 +274,19 @@ const isStandaloneTextElement = (
   }
 
   if (typeof element.customData?.taskId === "string") {
+    return false;
+  }
+
+  if (
+    shouldSuppressRecentlyDeletedSourceText(
+      {
+        text: element.text,
+        x: element.x,
+        y: element.y,
+      },
+      recentlyDeletedSourceEntries,
+    )
+  ) {
     return false;
   }
 
@@ -526,7 +545,11 @@ export default function App() {
   const [editingTaskField, setEditingTaskField] = useState<"title" | "summary" | null>(
     null,
   );
+  const [draftSourceTitle, setDraftSourceTitle] = useState("");
+  const [draftSourceSummary, setDraftSourceSummary] = useState("");
   const [draftSourceText, setDraftSourceText] = useState("");
+  const [isReanalyzingSource, setIsReanalyzingSource] = useState(false);
+  const [sourceActionError, setSourceActionError] = useState<string | null>(null);
   const [imageAttachmentsById, setImageAttachmentsById] = useState<
     Record<string, LoadedImageAttachment>
   >({});
@@ -538,13 +561,20 @@ export default function App() {
   const processedManualTextIdsRef = useRef(new Set<string>());
   const creatingManualTextIdsRef = useRef(new Set<string>());
   const lastAutoFocusKeyRef = useRef<string | null>(null);
-  const previousLastCaptureIdRef = useRef<string | null>(null);
+  const lastAutoFocusSourceKeyRef = useRef<string | null>(null);
+  const previousLastCaptureEventKeyRef = useRef<string | null>(null);
   const registeredCanvasApiIdRef = useRef<string | null>(null);
   const registeredAttachmentIdsRef = useRef(new Set<string>());
   const pendingSourceCardDeletesRef = useRef(new Set<string>());
+  const recentlyDeletedSourceEntriesRef = useRef<RecentlyDeletedSourceEntry[]>([]);
 
   const language = workspace?.ui.language ?? DEFAULT_LANGUAGE;
   const t = getMessages(language);
+  const applyWorkspaceSnapshot = (snapshot: WorkspaceSnapshot) => {
+    startTransition(() => {
+      setWorkspace(snapshot);
+    });
+  };
 
   useEffect(() => {
     let disposed = false;
@@ -678,14 +708,23 @@ export default function App() {
     }
 
     const latestCaptureId = workspace.ui.lastCaptureId ?? null;
+    const latestCaptureEventKey = buildCaptureEventKey(
+      latestCaptureId,
+      workspace.ui.lastCaptureAt,
+    );
+    const visibleSourceCards = getVisibleSourceCards(workspace);
 
-    if (!latestCaptureId || latestCaptureId === previousLastCaptureIdRef.current) {
+    if (
+      !latestCaptureId ||
+      !latestCaptureEventKey ||
+      latestCaptureEventKey === previousLastCaptureEventKeyRef.current
+    ) {
       return;
     }
 
-    previousLastCaptureIdRef.current = latestCaptureId;
+    previousLastCaptureEventKeyRef.current = latestCaptureEventKey;
     const relatedSourceCard =
-      workspace.sourceCards.find((card) => card.captureId === latestCaptureId) || null;
+      visibleSourceCards.find((card) => card.captureId === latestCaptureId) || null;
 
     if (!relatedSourceCard) {
       return;
@@ -703,9 +742,11 @@ export default function App() {
       return;
     }
 
+    const visibleTaskItems = getVisibleTaskItems(workspace);
+
     if (
       selectedTaskId &&
-      workspace.taskItems.some((taskItem) => taskItem.id === selectedTaskId)
+      visibleTaskItems.some((taskItem) => taskItem.id === selectedTaskId)
     ) {
       return;
     }
@@ -714,12 +755,15 @@ export default function App() {
       const linkedTaskId =
         workspace.sourceCards.find((sourceCard) => sourceCard.id === selectedSourceCardId)
           ?.linkedTaskIds[0] || null;
+      const visibleLinkedTaskId = visibleTaskItems.some((taskItem) => taskItem.id === linkedTaskId)
+        ? linkedTaskId
+        : null;
 
-      setSelectedTaskId(linkedTaskId);
+      setSelectedTaskId(visibleLinkedTaskId);
       return;
     }
 
-    setSelectedTaskId(workspace.taskItems[0]?.id ?? null);
+    setSelectedTaskId(visibleTaskItems[0]?.id ?? null);
   }, [workspace, selectedSourceCardId, selectedTaskId]);
 
   useEffect(() => {
@@ -727,9 +771,12 @@ export default function App() {
       return;
     }
 
+    const visibleSourceCards = getVisibleSourceCards(workspace);
+    const visibleTaskItems = getVisibleTaskItems(workspace);
+
     const selectedSourceCardStillExists = Boolean(
       selectedSourceCardId &&
-        workspace.sourceCards.some((sourceCard) => sourceCard.id === selectedSourceCardId),
+        visibleSourceCards.some((sourceCard) => sourceCard.id === selectedSourceCardId),
     );
 
     if (selectedSourceCardStillExists) {
@@ -737,11 +784,11 @@ export default function App() {
     }
 
     const sourceCardIdFromSelectedTask = selectedTaskId
-      ? workspace.taskItems.find((taskItem) => taskItem.id === selectedTaskId)
+      ? visibleTaskItems.find((taskItem) => taskItem.id === selectedTaskId)
           ?.sourceCardIds[0] || null
       : null;
     const latestSourceCardId = workspace.ui.lastCaptureId
-      ? workspace.sourceCards.find(
+      ? visibleSourceCards.find(
           (sourceCard) => sourceCard.captureId === workspace.ui.lastCaptureId,
         )?.id || null
       : null;
@@ -749,7 +796,7 @@ export default function App() {
     setSelectedSourceCardId(
       sourceCardIdFromSelectedTask ||
         latestSourceCardId ||
-        workspace.sourceCards[0]?.id ||
+        visibleSourceCards[0]?.id ||
         null,
     );
   }, [workspace, selectedSourceCardId, selectedTaskId]);
@@ -765,7 +812,12 @@ export default function App() {
       return;
     }
 
-    const canvasSourceCards = getCanvasSourceCards(workspace);
+    const visibleSourceCards = getVisibleSourceCards(workspace);
+    const visibleTaskItems = getVisibleTaskItems(workspace);
+    const canvasSourceCards = getCanvasSourceCards({
+      ...workspace,
+      sourceCards: visibleSourceCards,
+    });
     const imageAttachmentMetaById = Object.fromEntries(
       Object.entries(imageAttachmentsById).map(([attachmentId, attachment]) => [
         attachmentId,
@@ -777,24 +829,24 @@ export default function App() {
     );
     const previewTaskId = hoveredTaskId || selectedTaskId;
     const previewTask =
-      workspace.taskItems.find((taskItem) => taskItem.id === previewTaskId) || null;
+      visibleTaskItems.find((taskItem) => taskItem.id === previewTaskId) || null;
     const activeSourceIds =
       previewTask?.sourceCardIds ||
       (selectedSourceCardId ? [selectedSourceCardId] : []);
     const focusedSourceCardId =
       selectedSourceCardId ||
       (selectedTaskId
-        ? workspace.taskItems.find((taskItem) => taskItem.id === selectedTaskId)
+        ? visibleTaskItems.find((taskItem) => taskItem.id === selectedTaskId)
             ?.sourceCardIds[0] || null
         : null) ||
       (workspace.ui.lastCaptureId
-        ? workspace.sourceCards.find(
+        ? visibleSourceCards.find(
             (sourceCard) => sourceCard.captureId === workspace.ui.lastCaptureId,
           )?.id || null
         : null);
     const taskCardLayouts = getTaskCardLayouts(
-      workspace.sourceCards,
-      workspace.taskItems,
+      visibleSourceCards,
+      visibleTaskItems,
       focusedSourceCardId,
       previewTaskId,
       taskCardPositionsById,
@@ -960,7 +1012,9 @@ export default function App() {
       return;
     }
 
-    const selectedTask = workspace.taskItems.find(
+    const visibleTaskItems = getVisibleTaskItems(workspace);
+
+    const selectedTask = visibleTaskItems.find(
       (taskItem) => taskItem.id === selectedTaskId,
     );
 
@@ -968,7 +1022,10 @@ export default function App() {
       return;
     }
 
-    const focusKey = `${selectedTaskId}:${workspace.ui.lastCaptureId ?? "none"}`;
+    const focusKey = `${selectedTaskId}:${
+      buildCaptureEventKey(workspace.ui.lastCaptureId, workspace.ui.lastCaptureAt) ??
+      "none"
+    }`;
 
     if (lastAutoFocusKeyRef.current === focusKey) {
       return;
@@ -996,6 +1053,52 @@ export default function App() {
   }, [canvasApi, selectedTaskId, workspace]);
 
   useEffect(() => {
+    if (!workspace || !canvasApi || !selectedSourceCardId || selectedTaskId) {
+      return;
+    }
+
+    const selectedSourceCard =
+      getVisibleSourceCards(workspace).find(
+        (sourceCard) => sourceCard.id === selectedSourceCardId,
+      ) || null;
+
+    if (!selectedSourceCard || selectedSourceCard.captureId !== workspace.ui.lastCaptureId) {
+      return;
+    }
+
+    const captureEventKey = buildCaptureEventKey(
+      workspace.ui.lastCaptureId,
+      workspace.ui.lastCaptureAt,
+    );
+
+    if (!captureEventKey) {
+      return;
+    }
+
+    const focusKey = `${selectedSourceCardId}:${captureEventKey}`;
+
+    if (lastAutoFocusSourceKeyRef.current === focusKey) {
+      return;
+    }
+
+    lastAutoFocusSourceKeyRef.current = focusKey;
+
+    requestAnimationFrame(() => {
+      const targetElements = canvasApi
+        .getSceneElements()
+        .filter((element) => element.id === selectedSourceCardId);
+
+      if (targetElements.length === 0) {
+        return;
+      }
+
+      canvasApi.scrollToContent(targetElements, {
+        animate: false,
+      });
+    });
+  }, [canvasApi, selectedSourceCardId, selectedTaskId, workspace]);
+
+  useEffect(() => {
     if (!workspace) {
       return;
     }
@@ -1019,12 +1122,17 @@ export default function App() {
   }, [workspace]);
 
   const previewTaskId = hoveredTaskId || selectedTaskId;
+  const visibleSourceCards = workspace ? getVisibleSourceCards(workspace) : [];
+  const visibleTaskItems = workspace ? getVisibleTaskItems(workspace) : [];
+  const sourceInboxCards = visibleSourceCards.filter(
+    (sourceCard) => sourceCard.reviewStatus === "inbox",
+  );
   const selectedTask =
-    workspace?.taskItems.find((taskItem) => taskItem.id === selectedTaskId) || null;
+    visibleTaskItems.find((taskItem) => taskItem.id === selectedTaskId) || null;
   const taskSections = TASK_STATUS_ORDER.map((status) => ({
     status,
     title: t.taskSections[status].title,
-    items: workspace?.taskItems.filter((taskItem) => taskItem.status === status) || [],
+    items: visibleTaskItems.filter((taskItem) => taskItem.status === status),
   }));
   const taskSectionCountByStatus = taskSections.reduce<Record<TaskStatus, number>>(
     (accumulator, section) => {
@@ -1037,32 +1145,38 @@ export default function App() {
       done: 0,
     },
   );
-  const totalTaskCount = workspace?.taskItems.length || 0;
-  const sourceCount = workspace?.sourceCards.length || 0;
-  const isEmptyCanvas = Boolean(workspace && workspace.sourceCards.length === 0);
+  const totalTaskCount = visibleTaskItems.length;
+  const sourceCount = visibleSourceCards.length;
+  const isEmptyCanvas = Boolean(workspace && visibleSourceCards.length === 0);
   const selectedSourceCard =
     workspace && selectedSourceCardId
-      ? workspace.sourceCards.find((sourceCard) => sourceCard.id === selectedSourceCardId) ||
+      ? visibleSourceCards.find((sourceCard) => sourceCard.id === selectedSourceCardId) ||
         null
       : null;
   const focusedSourceCardId =
     selectedSourceCardId ||
     selectedTask?.sourceCardIds[0] ||
     (workspace?.ui.lastCaptureId
-      ? workspace.sourceCards.find(
+      ? visibleSourceCards.find(
           (sourceCard) => sourceCard.captureId === workspace.ui.lastCaptureId,
         )?.id || null
       : null);
   const activeSourceCards =
     workspace && selectedTask
-      ? getSourceCardsForTask(workspace, selectedTask)
+      ? getSourceCardsForTask(
+          {
+            ...workspace,
+            sourceCards: visibleSourceCards,
+          },
+          selectedTask,
+        )
       : selectedSourceCard
         ? [selectedSourceCard]
         : [];
   const taskCardLayouts = workspace
     ? getTaskCardLayouts(
-        workspace.sourceCards,
-        workspace.taskItems,
+        visibleSourceCards,
+        visibleTaskItems,
         focusedSourceCardId,
         previewTaskId,
         taskCardPositionsById,
@@ -1073,7 +1187,7 @@ export default function App() {
       ? getPrimaryCapture(workspace, activeSourceCards)
       : null;
   const lastCapturedSourceCard = workspace?.ui.lastCaptureId
-    ? workspace.sourceCards.find((card) => card.captureId === workspace.ui.lastCaptureId) ||
+    ? visibleSourceCards.find((card) => card.captureId === workspace.ui.lastCaptureId) ||
       null
     : null;
   const inspectedCapture =
@@ -1100,8 +1214,20 @@ export default function App() {
   }, [selectedTask?.id, selectedTask?.summary]);
 
   useEffect(() => {
+    setDraftSourceTitle(primarySourceCard?.title || "");
+  }, [primarySourceCard?.id, primarySourceCard?.title]);
+
+  useEffect(() => {
+    setDraftSourceSummary(primarySourceCard?.summary || "");
+  }, [primarySourceCard?.id, primarySourceCard?.summary]);
+
+  useEffect(() => {
     setDraftSourceText(inspectedCapture?.rawText || "");
   }, [inspectedCapture?.id, inspectedCapture?.rawText]);
+
+  useEffect(() => {
+    setSourceActionError(null);
+  }, [primarySourceCard?.id, inspectedCapture?.id]);
 
   useEffect(() => {
     if (isInspectorOpen && selectedTask) {
@@ -1285,6 +1411,27 @@ export default function App() {
     }
   };
 
+  const handleSourceInboxClick = (sourceCard: SourceCard) => {
+    setHoveredTaskId(null);
+    setSelectedTaskId(null);
+    setSelectedSourceCardId(sourceCard.id);
+    setIsInspectorOpen(true);
+
+    if (!canvasApi) {
+      return;
+    }
+
+    const targetElements = canvasApi
+      .getSceneElements()
+      .filter((element) => element.id === sourceCard.id);
+
+    if (targetElements.length > 0) {
+      canvasApi.scrollToContent(targetElements, {
+        animate: true,
+      });
+    }
+  };
+
   const handleTaskStatusChange = async (
     taskId: string,
     status: "inbox" | "doing" | "done",
@@ -1312,9 +1459,30 @@ export default function App() {
 
     setHoveredTaskId((current) => (current === taskItem.id ? null : current));
     setSelectedTaskId((current) => (current === taskItem.id ? null : current));
-    await window.desktopApi.deleteTask({
+    const nextSnapshot = await window.desktopApi.deleteTask({
       taskId: taskItem.id,
     });
+    applyWorkspaceSnapshot(nextSnapshot);
+  };
+
+  const handleSourceReviewStatusChange = async (
+    sourceCardId: string,
+    reviewStatus: "accepted" | "archived",
+  ) => {
+    await window.desktopApi.updateSourceCardReviewStatus({
+      sourceCardId,
+      reviewStatus,
+    });
+
+    if (reviewStatus === "accepted") {
+      const acceptedSourceCard =
+        workspace?.sourceCards.find((sourceCard) => sourceCard.id === sourceCardId) || null;
+      const nextTaskId = acceptedSourceCard?.linkedTaskIds[0] || null;
+
+      setSelectedSourceCardId(sourceCardId);
+      setSelectedTaskId(nextTaskId);
+      setIsInspectorOpen(true);
+    }
   };
 
   const handleLanguageChange = async (nextLanguage: AppLanguage) => {
@@ -1422,10 +1590,125 @@ export default function App() {
       return;
     }
 
-    await window.desktopApi.updateSourceCardText({
-      sourceCardId: primarySourceCard.id,
-      text: normalizedText,
-    });
+    try {
+      setSourceActionError(null);
+      await window.desktopApi.updateSourceCardText({
+        sourceCardId: primarySourceCard.id,
+        text: normalizedText,
+      });
+    } catch (error) {
+      setSourceActionError(error instanceof Error ? error.message : t.pipelineReviewFallback);
+    }
+  };
+
+  const handleSourceTitleCommit = async () => {
+    if (!primarySourceCard) {
+      return;
+    }
+
+    const normalizedTitle = draftSourceTitle.trim();
+
+    if (!normalizedTitle) {
+      setDraftSourceTitle(primarySourceCard.title);
+      return;
+    }
+
+    if (normalizedTitle === primarySourceCard.title) {
+      return;
+    }
+
+    try {
+      setSourceActionError(null);
+      await window.desktopApi.updateSourceCardDetails({
+        sourceCardId: primarySourceCard.id,
+        title: normalizedTitle,
+        summary: primarySourceCard.summary,
+      });
+    } catch (error) {
+      setSourceActionError(error instanceof Error ? error.message : t.pipelineReviewFallback);
+    }
+  };
+
+  const handleSourceSummaryCommit = async () => {
+    if (!primarySourceCard) {
+      return;
+    }
+
+    const normalizedSummary = draftSourceSummary.trim();
+
+    if (!normalizedSummary) {
+      setDraftSourceSummary(primarySourceCard.summary);
+      return;
+    }
+
+    if (normalizedSummary === primarySourceCard.summary) {
+      return;
+    }
+
+    try {
+      setSourceActionError(null);
+      await window.desktopApi.updateSourceCardDetails({
+        sourceCardId: primarySourceCard.id,
+        title: primarySourceCard.title,
+        summary: normalizedSummary,
+      });
+    } catch (error) {
+      setSourceActionError(error instanceof Error ? error.message : t.pipelineReviewFallback);
+    }
+  };
+
+  const handleSourceReanalyze = async () => {
+    if (!primarySourceCard || isReanalyzingSource) {
+      return;
+    }
+
+    setIsReanalyzingSource(true);
+    setSourceActionError(null);
+
+    try {
+      await window.desktopApi.reanalyzeSourceCard({
+        sourceCardId: primarySourceCard.id,
+      });
+    } catch (error) {
+      setSourceActionError(error instanceof Error ? error.message : t.pipelineReviewFallback);
+    } finally {
+      setIsReanalyzingSource(false);
+    }
+  };
+
+  const handleSourceDelete = async () => {
+    if (!primarySourceCard) {
+      return;
+    }
+
+    const confirmed = window.confirm(t.deleteSourceConfirm(primarySourceCard.title));
+
+    if (!confirmed) {
+      return;
+    }
+
+    const linkedTaskIds = new Set(primarySourceCard.linkedTaskIds);
+    recentlyDeletedSourceEntriesRef.current = rememberRecentlyDeletedSource(
+      recentlyDeletedSourceEntriesRef.current,
+      primarySourceCard,
+    );
+
+    try {
+      setSourceActionError(null);
+      const nextSnapshot = await window.desktopApi.deleteSourceCard({
+        sourceCardId: primarySourceCard.id,
+      });
+      applyWorkspaceSnapshot(nextSnapshot);
+      setHoveredTaskId(null);
+      setSelectedSourceCardId((current) =>
+        current === primarySourceCard.id ? null : current,
+      );
+      setSelectedTaskId((current) =>
+        current && linkedTaskIds.has(current) ? null : current,
+      );
+    } catch (error) {
+      setSourceActionError(error instanceof Error ? error.message : t.pipelineReviewFallback);
+    }
   };
 
   const handleScrollChange = (
@@ -1507,10 +1790,27 @@ export default function App() {
 
     if (deletedSourceCardIds.length > 0) {
       deletedSourceCardIds.forEach((sourceCardId) => {
+        const deletedSourceCard =
+          workspace.sourceCards.find((sourceCard) => sourceCard.id === sourceCardId) || null;
+
+        if (!deletedSourceCard) {
+          return;
+        }
+
+        recentlyDeletedSourceEntriesRef.current = rememberRecentlyDeletedSource(
+          recentlyDeletedSourceEntriesRef.current,
+          deletedSourceCard,
+        );
+      });
+
+      deletedSourceCardIds.forEach((sourceCardId) => {
         pendingSourceCardDeletesRef.current.add(sourceCardId);
         void window.desktopApi
           .deleteSourceCard({
             sourceCardId,
+          })
+          .then((nextSnapshot) => {
+            applyWorkspaceSnapshot(nextSnapshot);
           })
           .finally(() => {
             pendingSourceCardDeletesRef.current.delete(sourceCardId);
@@ -1519,6 +1819,10 @@ export default function App() {
 
       return;
     }
+
+    recentlyDeletedSourceEntriesRef.current = pruneRecentlyDeletedSources(
+      recentlyDeletedSourceEntriesRef.current,
+    );
 
     const changedPositions = workspace.sourceCards
       .map((sourceCard) => {
@@ -1624,7 +1928,13 @@ export default function App() {
     }
 
     const manualTextElements = elements.filter((element) => {
-      if (!isStandaloneTextElement(workspace, element)) {
+      if (
+        !isStandaloneTextElement(
+          workspace,
+          element,
+          recentlyDeletedSourceEntriesRef.current,
+        )
+      ) {
         return false;
       }
 
@@ -1634,20 +1944,30 @@ export default function App() {
       );
     });
 
-    manualTextElements.forEach((element) => {
-      processedManualTextIdsRef.current.add(element.id);
-      creatingManualTextIdsRef.current.add(element.id);
+    const manualCaptureGroups = groupManualTextCaptureCandidates(
+      manualTextElements.map((element) => ({
+        id: element.id,
+        text: element.text?.trim() || "",
+        x: element.x,
+        y: element.y,
+      })),
+    );
+
+    manualCaptureGroups.forEach((group) => {
+      group.elementIds.forEach((elementId) => {
+        processedManualTextIdsRef.current.add(elementId);
+        creatingManualTextIdsRef.current.add(elementId);
+      });
 
       void window.desktopApi
         .createManualTextCapture({
-          text: element.text?.trim() || "",
-          position: {
-            x: element.x,
-            y: element.y,
-          },
+          text: group.text,
+          position: group.position,
         })
         .finally(() => {
-          creatingManualTextIdsRef.current.delete(element.id);
+          group.elementIds.forEach((elementId) => {
+            creatingManualTextIdsRef.current.delete(elementId);
+          });
         });
     });
   };
@@ -1773,6 +2093,7 @@ export default function App() {
 
   const detailTitle =
     selectedTask?.title ||
+    primarySourceCard?.title ||
     inspectedSourceCards[0]?.title ||
     t.pickTask;
   const selectedTaskChecklist = selectedTask?.checklist || [];
@@ -1800,6 +2121,7 @@ export default function App() {
   const hasInspectorContent = Boolean(selectedTask || inspectedCapture);
   const inspectorSummary =
     selectedTask?.summary ||
+    primarySourceCard?.summary ||
     inspectedCapture?.aiSummary ||
     t.hoverToInspect;
   const inspectorCreatedAt =
@@ -1843,12 +2165,52 @@ export default function App() {
   const handleSourceTextKeyDown = (
     event: ReactKeyboardEvent<HTMLTextAreaElement>,
   ) => {
+    if (event.key === "Escape") {
+      setDraftSourceText(inspectedCapture?.rawText || "");
+      event.currentTarget.blur();
+      return;
+    }
+
     if (event.key !== "Enter" || (!event.metaKey && !event.ctrlKey)) {
       return;
     }
 
     event.preventDefault();
     void handleSourceTextCommit();
+    event.currentTarget.blur();
+  };
+  const handleSourceTitleKeyDown = (
+    event: ReactKeyboardEvent<HTMLInputElement>,
+  ) => {
+    if (event.key === "Escape") {
+      setDraftSourceTitle(primarySourceCard?.title || "");
+      event.currentTarget.blur();
+      return;
+    }
+
+    if (event.key !== "Enter") {
+      return;
+    }
+
+    event.preventDefault();
+    void handleSourceTitleCommit();
+    event.currentTarget.blur();
+  };
+  const handleSourceSummaryKeyDown = (
+    event: ReactKeyboardEvent<HTMLTextAreaElement>,
+  ) => {
+    if (event.key === "Escape") {
+      setDraftSourceSummary(primarySourceCard?.summary || "");
+      event.currentTarget.blur();
+      return;
+    }
+
+    if (event.key !== "Enter" || (!event.metaKey && !event.ctrlKey)) {
+      return;
+    }
+
+    event.preventDefault();
+    void handleSourceSummaryCommit();
     event.currentTarget.blur();
   };
 
@@ -2037,6 +2399,52 @@ export default function App() {
           </div>
 
           <div className="task-pane__sections">
+            <section className="task-section task-section--source-inbox">
+              <div className="task-section__header">
+                <div>
+                  <h3>{t.sourceInboxLabel}</h3>
+                  <p className="task-section__tone">{t.sourceInboxHint}</p>
+                </div>
+                <span>{sourceInboxCards.length}</span>
+              </div>
+
+              {sourceInboxCards.length === 0 ? (
+                <div className="task-empty task-empty--compact">{t.sourceInboxEmpty}</div>
+              ) : (
+                <div className="source-inbox-list">
+                  {sourceInboxCards.map((sourceCard) => (
+                    <div className="source-inbox-row" key={sourceCard.id}>
+                      <button
+                        className="source-inbox-row__select"
+                        onClick={() => handleSourceInboxClick(sourceCard)}
+                      >
+                        <span className="source-inbox-row__title">{sourceCard.title}</span>
+                        <span className="source-inbox-row__summary">{sourceCard.summary}</span>
+                      </button>
+                      <div className="source-inbox-row__actions">
+                        <button
+                          className="secondary-button secondary-button--compact"
+                          onClick={() =>
+                            void handleSourceReviewStatusChange(sourceCard.id, "accepted")
+                          }
+                        >
+                          {t.sourceAccept}
+                        </button>
+                        <button
+                          className="secondary-button secondary-button--compact"
+                          onClick={() =>
+                            void handleSourceReviewStatusChange(sourceCard.id, "archived")
+                          }
+                        >
+                          {t.sourceArchive}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
             {totalTaskCount === 0 ? (
               <div className="task-empty">{t.noItems}</div>
             ) : (
@@ -2285,19 +2693,72 @@ export default function App() {
                   </section>
                 ) : null}
 
+                {primarySourceCard ? (
+                  <section className="inspector-card">
+                    <label className="detail-label" htmlFor="source-title-input">
+                      {t.sourceTitleLabel}
+                    </label>
+                    <input
+                      id="source-title-input"
+                      className="detail-input"
+                      value={draftSourceTitle}
+                      onChange={(event) => {
+                        setDraftSourceTitle(event.target.value);
+                        setSourceActionError(null);
+                      }}
+                      onBlur={() => void handleSourceTitleCommit()}
+                      onKeyDown={handleSourceTitleKeyDown}
+                    />
+                  </section>
+                ) : null}
+
+                {primarySourceCard ? (
+                  <section className="inspector-card">
+                    <label className="detail-label" htmlFor="source-summary-input">
+                      {t.sourceSummaryLabel}
+                    </label>
+                    <textarea
+                      id="source-summary-input"
+                      className="detail-textarea detail-textarea--summary"
+                      value={draftSourceSummary}
+                      onChange={(event) => {
+                        setDraftSourceSummary(event.target.value);
+                        setSourceActionError(null);
+                      }}
+                      onBlur={() => void handleSourceSummaryCommit()}
+                      onKeyDown={handleSourceSummaryKeyDown}
+                    />
+                  </section>
+                ) : null}
+
                 {inspectedCapture ? (
                   <section className="inspector-card inspector-card--stretch">
-                    <label className="detail-label" htmlFor="source-text-input">
-                      {t.capturedText}
-                    </label>
+                    <div className="attachment-preview__header">
+                      <label className="detail-label" htmlFor="source-text-input">
+                        {t.capturedText}
+                      </label>
+                      <button
+                        className="secondary-button secondary-button--compact"
+                        onClick={() => void handleSourceReanalyze()}
+                        disabled={isReanalyzingSource}
+                      >
+                        {isReanalyzingSource ? t.reanalyzingSource : t.reanalyzeSource}
+                      </button>
+                    </div>
                     <textarea
                       id="source-text-input"
                       className="detail-textarea"
                       value={draftSourceText}
-                      onChange={(event) => setDraftSourceText(event.target.value)}
+                      onChange={(event) => {
+                        setDraftSourceText(event.target.value);
+                        setSourceActionError(null);
+                      }}
                       onBlur={() => void handleSourceTextCommit()}
                       onKeyDown={handleSourceTextKeyDown}
                     />
+                    {sourceActionError ? (
+                      <p className="settings-status is-error">{sourceActionError}</p>
+                    ) : null}
                   </section>
                 ) : null}
 
@@ -2324,6 +2785,18 @@ export default function App() {
                         </span>
                       ))}
                     </div>
+                  </section>
+                ) : null}
+
+                {primarySourceCard ? (
+                  <section className="inspector-card inspector-card--actions">
+                    <button
+                      type="button"
+                      className="secondary-button secondary-button--danger"
+                      onClick={() => void handleSourceDelete()}
+                    >
+                      {t.deleteSource}
+                    </button>
                   </section>
                 ) : null}
               </div>

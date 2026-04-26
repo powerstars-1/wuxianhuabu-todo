@@ -330,6 +330,12 @@ img {
   color: var(--text-base);
 }
 
+.secondary-button--danger {
+  border-color: rgba(194, 58, 58, 0.24);
+  background: rgba(254, 241, 241, 0.94);
+  color: var(--danger);
+}
+
 .secondary-button--compact {
   min-height: 32px;
   padding: 0 12px;
@@ -360,6 +366,7 @@ img {
 .secondary-button:focus-visible,
 .icon-button:focus-visible,
 .status-switcher button:focus-visible,
+.source-inbox-row__select:focus-visible,
 .task-row__select:focus-visible,
 .task-row__toggle:focus-visible,
 .task-row__delete:focus-visible,
@@ -732,8 +739,59 @@ img {
   font-weight: 700;
 }
 
+.task-section__tone {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .task-section__list {
   display: grid;
+  gap: 8px;
+}
+
+.source-inbox-list {
+  display: grid;
+  gap: 8px;
+}
+
+.source-inbox-row {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(134, 150, 173, 0.16);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 10px 18px rgba(15, 23, 42, 0.05);
+}
+
+.source-inbox-row__select {
+  display: grid;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.source-inbox-row__title {
+  color: var(--text-strong);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.source-inbox-row__summary {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.source-inbox-row__actions {
+  display: flex;
+  justify-content: flex-end;
   gap: 8px;
 }
 
@@ -905,6 +963,11 @@ img {
   text-align: center;
 }
 
+.task-empty--compact {
+  min-height: 88px;
+  font-size: 12px;
+}
+
 .inspector-drawer {
   position: absolute;
   top: 54px;
@@ -999,6 +1062,11 @@ img {
 
 .inspector-card--stretch .detail-textarea {
   min-height: 190px;
+}
+
+.inspector-card--actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .inspector-grid {
@@ -1272,6 +1340,7 @@ img {
   z-index: 48;
   display: grid;
   place-items: center;
+  overflow-y: auto;
   padding: 24px;
   background: rgba(15, 23, 42, 0.24);
   backdrop-filter: blur(12px);
@@ -1339,8 +1408,10 @@ img {
 
 .settings-panel {
   width: min(640px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
   display: grid;
   gap: 18px;
+  overflow-y: auto;
   padding: 22px;
   border: 1px solid rgba(255, 255, 255, 0.76);
   border-radius: 30px;

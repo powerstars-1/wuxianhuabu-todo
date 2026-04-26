@@ -19,6 +19,8 @@ const getDesktopCopy = (language) => {
       captureSaved: "Saved to canvas.",
       captureSavedAndProjected: (count) =>
         `Saved to canvas and projected ${count} task${count > 1 ? "s" : ""}.`,
+      duplicateCaptureReused:
+        "This content is already on the canvas. Reusing the existing source.",
       captureSavedButFailed: (errorMessage) =>
         errorMessage
           ? `Capture saved, but organizing failed: ${errorMessage}`
@@ -70,6 +72,7 @@ const getDesktopCopy = (language) => {
     recordedToCanvasOrganizing: "已记录到画布，正在整理...",
     captureSaved: "已收纳到画布。",
     captureSavedAndProjected: (count) => `已收纳到画布，并整理出 ${count} 条待办。`,
+    duplicateCaptureReused: "这条内容已经在画布里了，已直接定位到现有来源。",
     captureSavedButFailed: (errorMessage) =>
       errorMessage
         ? `内容已收录，但整理失败：${errorMessage}`

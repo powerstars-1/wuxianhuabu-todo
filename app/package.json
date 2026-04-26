@@ -9,7 +9,7 @@
     "dev:renderer": "vite",
     "dev:electron": "wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
     "build": "vite build",
-    "test:electron": "node --test --test-isolation=none electron/windowChrome.test.cjs electron/shortcutDisplay.test.cjs",
+    "test:electron": "node --test electron/windowChrome.test.cjs electron/shortcutDisplay.test.cjs electron/capturePipeline.test.cjs electron/sourceCardAnalysis.test.cjs electron/sourceInbox.test.cjs electron/sourceDelete.test.cjs electron/taskDelete.test.cjs src/settingsPanelLayout.test.cjs && node --experimental-transform-types --test src/lib/captureFocus.test.ts src/lib/recentlyDeletedSourceSuppression.test.ts",
     "dist:win": "npm run build && electron-builder --win nsis",
     "dist:mac": "npm run build && electron-builder --mac dmg zip",
     "preview": "vite preview",

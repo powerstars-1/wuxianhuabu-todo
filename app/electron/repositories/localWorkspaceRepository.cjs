@@ -78,10 +78,38 @@ const createEmptyWorkspace = () => {
   };
 };
 
+const normalizeSourceReviewStatus = (value) => {
+  if (value === "inbox" || value === "archived") {
+    return value;
+  }
+
+  return "accepted";
+};
+
+const archiveLegacyOrphanedAcceptedSources = (normalizedWorkspace) => {
+  const capturesById = new Map(
+    normalizedWorkspace.captures.map((capture) => [capture.id, capture]),
+  );
+
+  normalizedWorkspace.sourceCards.forEach((sourceCard) => {
+    if (sourceCard.reviewStatus !== "accepted" || sourceCard.linkedTaskIds.length > 0) {
+      return;
+    }
+
+    const capture = capturesById.get(sourceCard.captureId);
+
+    if (!capture || !Array.isArray(capture.aiTaskSuggestions) || capture.aiTaskSuggestions.length === 0) {
+      return;
+    }
+
+    sourceCard.reviewStatus = "archived";
+  });
+};
+
 const normalizeWorkspace = (workspace) => {
   const fallback = createEmptyWorkspace();
 
-  return {
+  const normalizedWorkspace = {
     ...fallback,
     ...workspace,
     board: {
@@ -119,7 +147,12 @@ const normalizeWorkspace = (workspace) => {
             : [],
         }))
       : [],
-    sourceCards: Array.isArray(workspace.sourceCards) ? workspace.sourceCards : [],
+    sourceCards: Array.isArray(workspace.sourceCards)
+      ? workspace.sourceCards.map((sourceCard) => ({
+          ...sourceCard,
+          reviewStatus: normalizeSourceReviewStatus(sourceCard?.reviewStatus),
+        }))
+      : [],
     taskItems: Array.isArray(workspace.taskItems)
       ? workspace.taskItems.map((taskItem) => ({
           ...taskItem,
@@ -136,6 +169,10 @@ const normalizeWorkspace = (workspace) => {
         : [],
     },
   };
+
+  archiveLegacyOrphanedAcceptedSources(normalizedWorkspace);
+
+  return normalizedWorkspace;
 };
 
 const createCaptureFeedItem = ({ captureId, stage, message }) => ({
@@ -197,6 +234,36 @@ const deriveSourceCardSummary = ({ rawText, sourceType, copy }) => {
   }
 
   return copy.capturedForLaterReview;
+};
+
+const resolveSourceCardTitle = ({ analysis, rawText, sourceType, copy }) => {
+  const candidateTitle =
+    typeof analysis?.sourceTitle === "string" ? analysis.sourceTitle.trim() : "";
+
+  if (candidateTitle) {
+    return shorten(candidateTitle, 42);
+  }
+
+  return deriveSourceCardTitle({
+    rawText,
+    sourceType,
+    copy,
+  });
+};
+
+const resolveSourceCardSummary = ({ analysis, rawText, sourceType, copy }) => {
+  const candidateSummary =
+    typeof analysis?.sourceSummary === "string" ? analysis.sourceSummary.trim() : "";
+
+  if (candidateSummary) {
+    return shorten(candidateSummary, 160);
+  }
+
+  return deriveSourceCardSummary({
+    rawText,
+    sourceType,
+    copy,
+  });
 };
 
 const createTaskItemFromSuggestion = ({ suggestion, sourceCardId, createdAt }) => ({
@@ -305,16 +372,22 @@ class LocalWorkspaceRepository {
 
         return {
           ...sourceCard,
-          title: deriveSourceCardTitle({
-            rawText: capture.rawText,
-            sourceType: sourceCard.sourceType,
-            copy,
-          }),
-          summary: deriveSourceCardSummary({
-            rawText: capture.rawText,
-            sourceType: sourceCard.sourceType,
-            copy,
-          }),
+          title:
+            typeof sourceCard.title === "string" && sourceCard.title.trim()
+              ? sourceCard.title
+              : deriveSourceCardTitle({
+                  rawText: capture.rawText,
+                  sourceType: sourceCard.sourceType,
+                  copy,
+                }),
+          summary:
+            typeof sourceCard.summary === "string" && sourceCard.summary.trim()
+              ? sourceCard.summary
+              : deriveSourceCardSummary({
+                  rawText: capture.rawText,
+                  sourceType: sourceCard.sourceType,
+                  copy,
+                }),
         };
       });
 
@@ -591,6 +664,38 @@ class LocalWorkspaceRepository {
     );
   }
 
+  findReusableTextCapture(rawText) {
+    const workspace = this.readWorkspace();
+    const normalizedText = normalizeCapturedText(rawText);
+
+    if (!normalizedText) {
+      return null;
+    }
+
+    const duplicateCapture = workspace.captures.find(
+      (capture) =>
+        capture.sourceType === "text" &&
+        capture.aiStatus !== "failed" &&
+        normalizeCapturedText(capture.rawText) === normalizedText,
+    );
+
+    if (!duplicateCapture) {
+      return null;
+    }
+
+    const sourceCard =
+      workspace.sourceCards.find((item) => item.captureId === duplicateCapture.id) || null;
+
+    if (!sourceCard) {
+      return null;
+    }
+
+    return {
+      captureId: duplicateCapture.id,
+      sourceCardId: sourceCard.id,
+    };
+  }
+
   enqueueCapture({ capture, sourceCard, attachments, message }) {
     const workspace = this.readWorkspace();
     const updatedAt = nowIso();
@@ -609,6 +714,35 @@ class LocalWorkspaceRepository {
       workspace,
       createCaptureFeedItem({
         captureId: capture.id,
+        stage: "captured",
+        message,
+      }),
+    );
+    workspace.board.updatedAt = updatedAt;
+    workspace.updatedAt = updatedAt;
+
+    this.writeWorkspace(workspace);
+
+    return clone(workspace);
+  }
+
+  reuseCapture(captureId, message) {
+    const workspace = this.readWorkspace();
+    const capture = workspace.captures.find((item) => item.id === captureId);
+
+    if (!capture) {
+      return clone(workspace);
+    }
+
+    const updatedAt = nowIso();
+    workspace.ui.captureStatus = "ready";
+    workspace.ui.captureMessage = message;
+    workspace.ui.lastCaptureId = captureId;
+    workspace.ui.lastCaptureAt = updatedAt;
+    this.prependCaptureFeed(
+      workspace,
+      createCaptureFeedItem({
+        captureId,
         stage: "captured",
         message,
       }),
@@ -652,12 +786,14 @@ class LocalWorkspaceRepository {
     capture.errorMessage = null;
 
     const copy = getDesktopCopy(workspace.ui.language);
-    sourceCard.title = deriveSourceCardTitle({
+    sourceCard.title = resolveSourceCardTitle({
+      analysis,
       rawText: capture.rawText,
       sourceType: sourceCard.sourceType,
       copy,
     });
-    sourceCard.summary = deriveSourceCardSummary({
+    sourceCard.summary = resolveSourceCardSummary({
+      analysis,
       rawText: capture.rawText,
       sourceType: sourceCard.sourceType,
       copy,
@@ -853,12 +989,14 @@ class LocalWorkspaceRepository {
     const updatedAt = nowIso();
     const copy = getDesktopCopy(workspace.ui.language);
 
-    sourceCard.title = deriveSourceCardTitle({
+    sourceCard.title = resolveSourceCardTitle({
+      analysis,
       rawText,
       sourceType: sourceCard.sourceType,
       copy,
     });
-    sourceCard.summary = deriveSourceCardSummary({
+    sourceCard.summary = resolveSourceCardSummary({
+      analysis,
       rawText,
       sourceType: sourceCard.sourceType,
       copy,
@@ -886,6 +1024,62 @@ class LocalWorkspaceRepository {
     this.reconcileSourceCardTasks(workspace, sourceCard, analysis, updatedAt);
     this.cleanupWorkspaceRelations(workspace, updatedAt);
 
+    workspace.board.updatedAt = updatedAt;
+    workspace.updatedAt = updatedAt;
+
+    this.writeWorkspace(workspace);
+
+    return clone(workspace);
+  }
+
+  updateSourceCardDetails(sourceCardId, { title, summary }) {
+    const workspace = this.readWorkspace();
+    const sourceCard = workspace.sourceCards.find((item) => item.id === sourceCardId);
+
+    if (!sourceCard) {
+      return clone(workspace);
+    }
+
+    const updatedAt = nowIso();
+    const nextTitle = typeof title === "string" ? title.trim() : "";
+    const nextSummary = typeof summary === "string" ? summary.trim() : "";
+
+    if (nextTitle) {
+      sourceCard.title = shorten(nextTitle, 42);
+    }
+
+    if (nextSummary) {
+      sourceCard.summary = shorten(nextSummary, 160);
+    }
+
+    sourceCard.updatedAt = updatedAt;
+
+    const capture = workspace.captures.find((item) => item.id === sourceCard.captureId);
+
+    if (capture && nextSummary) {
+      capture.aiSummary = shorten(nextSummary, 160);
+      capture.updatedAt = updatedAt;
+    }
+
+    workspace.board.updatedAt = updatedAt;
+    workspace.updatedAt = updatedAt;
+
+    this.writeWorkspace(workspace);
+
+    return clone(workspace);
+  }
+
+  updateSourceCardReviewStatus(sourceCardId, reviewStatus) {
+    const workspace = this.readWorkspace();
+    const sourceCard = workspace.sourceCards.find((item) => item.id === sourceCardId);
+
+    if (!sourceCard) {
+      return clone(workspace);
+    }
+
+    const updatedAt = nowIso();
+    sourceCard.reviewStatus = normalizeSourceReviewStatus(reviewStatus);
+    sourceCard.updatedAt = updatedAt;
     workspace.board.updatedAt = updatedAt;
     workspace.updatedAt = updatedAt;
 
@@ -973,20 +1167,17 @@ class LocalWorkspaceRepository {
 
     this.cleanupWorkspaceRelations(workspace, updatedAt);
 
-    if (
-      taskItem.sourceCardIds.length > 0 &&
-      workspace.sourceCards.some((sourceCard) =>
-        taskItem.sourceCardIds.includes(sourceCard.id),
-      )
-    ) {
-      workspace.sourceCards.forEach((sourceCard) => {
-        if (!taskItem.sourceCardIds.includes(sourceCard.id)) {
-          return;
-        }
+    workspace.sourceCards.forEach((sourceCard) => {
+      if (!taskItem.sourceCardIds.includes(sourceCard.id)) {
+        return;
+      }
 
-        sourceCard.updatedAt = updatedAt;
-      });
-    }
+      if (sourceCard.reviewStatus === "accepted" && sourceCard.linkedTaskIds.length === 0) {
+        sourceCard.reviewStatus = "archived";
+      }
+
+      sourceCard.updatedAt = updatedAt;
+    });
 
     workspace.board.updatedAt = updatedAt;
     workspace.updatedAt = updatedAt;

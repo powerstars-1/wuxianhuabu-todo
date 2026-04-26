@@ -17,6 +17,12 @@ contextBridge.exposeInMainWorld("desktopApi", {
   updateLanguage: (payload) => ipcRenderer.invoke("workspace:updateLanguage", payload),
   updateSourceCardText: (payload) =>
     ipcRenderer.invoke("workspace:updateSourceCardText", payload),
+  updateSourceCardDetails: (payload) =>
+    ipcRenderer.invoke("workspace:updateSourceCardDetails", payload),
+  reanalyzeSourceCard: (payload) =>
+    ipcRenderer.invoke("workspace:reanalyzeSourceCard", payload),
+  updateSourceCardReviewStatus: (payload) =>
+    ipcRenderer.invoke("workspace:updateSourceCardReviewStatus", payload),
   updateSourceCardPosition: (payload) =>
     ipcRenderer.invoke("workspace:updateSourceCardPosition", payload),
   updateTaskStatus: (payload) =>

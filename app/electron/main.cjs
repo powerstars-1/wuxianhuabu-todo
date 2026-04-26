@@ -458,6 +458,16 @@ const captureClipboard = async ({ notifyStart, openWindow }) => {
 
   broadcastSnapshot(initialSnapshot);
 
+  if (!pendingCapture) {
+    showNotification(copy.appTitle, initialSnapshot.ui.captureMessage);
+
+    if (openWindow) {
+      showWindow();
+    }
+
+    return initialSnapshot;
+  }
+
   void capturePipeline
     .completePendingCapture(pendingCapture)
     .then(({ snapshot, taskItems }) => {
@@ -504,6 +514,10 @@ const createManualTextCapture = async ({ text, position }) => {
   });
 
   broadcastSnapshot(initialSnapshot);
+
+  if (!pendingCapture) {
+    return initialSnapshot;
+  }
 
   try {
     const { snapshot } = await capturePipeline.completePendingCapture(pendingCapture);
@@ -589,6 +603,60 @@ const updateSourceCardText = async ({ sourceCardId, text }) => {
     rawText: normalizedText,
     analysis,
   });
+
+  broadcastSnapshot(nextSnapshot);
+  return nextSnapshot;
+};
+
+const updateSourceCardDetails = ({ sourceCardId, title, summary }) => {
+  const normalizedTitle = typeof title === "string" ? title.trim() : "";
+  const normalizedSummary = typeof summary === "string" ? summary.trim() : "";
+
+  if (!normalizedTitle && !normalizedSummary) {
+    return repository.getSnapshot();
+  }
+
+  const nextSnapshot = repository.updateSourceCardDetails(sourceCardId, {
+    title: normalizedTitle,
+    summary: normalizedSummary,
+  });
+
+  broadcastSnapshot(nextSnapshot);
+  return nextSnapshot;
+};
+
+const reanalyzeSourceCard = async ({ sourceCardId }) => {
+  const snapshot = repository.getSnapshot();
+  const sourceCard = snapshot.sourceCards.find((item) => item.id === sourceCardId);
+  const capture = sourceCard
+    ? snapshot.captures.find((item) => item.id === sourceCard.captureId)
+    : null;
+
+  if (!sourceCard || !capture) {
+    return snapshot;
+  }
+
+  const analysis = await analyzeCaptureWithCurrentConfig({
+    rawText: capture.rawText,
+    sourceType: capture.sourceType,
+    language: snapshot.ui.language,
+    attachmentIds: sourceCard.attachmentIds,
+  });
+  const nextSnapshot = repository.updateAnalyzedSourceCard({
+    sourceCardId,
+    rawText: capture.rawText,
+    analysis,
+  });
+
+  broadcastSnapshot(nextSnapshot);
+  return nextSnapshot;
+};
+
+const updateSourceCardReviewStatus = ({ sourceCardId, reviewStatus }) => {
+  const nextSnapshot = repository.updateSourceCardReviewStatus(
+    sourceCardId,
+    reviewStatus,
+  );
 
   broadcastSnapshot(nextSnapshot);
   return nextSnapshot;
@@ -787,6 +855,15 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("workspace:updateSourceCardText", (_event, payload) =>
     updateSourceCardText(payload),
+  );
+  ipcMain.handle("workspace:updateSourceCardDetails", (_event, payload) =>
+    updateSourceCardDetails(payload),
+  );
+  ipcMain.handle("workspace:reanalyzeSourceCard", (_event, payload) =>
+    reanalyzeSourceCard(payload),
+  );
+  ipcMain.handle("workspace:updateSourceCardReviewStatus", (_event, payload) =>
+    updateSourceCardReviewStatus(payload),
   );
 
   ipcMain.handle("workspace:updateSourceCardPosition", (_event, payload) => {
